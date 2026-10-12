@@ -3,6 +3,7 @@ import { stripImportedNodeControlFieldsFromList } from "@subboost/core/subscript
 import { resolveNodeNameFilter } from "@subboost/core/subscription/node-name-filter";
 import type { ParsedNode } from "@subboost/core/types/node";
 import type { ConfigState } from "./definitions";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
 
 function buildProxyProvidersFromSources(
   state: ConfigState
@@ -93,7 +94,7 @@ export function computeGeneratedYamlResult(state: ConfigState): GeneratedYamlRes
     const { effectiveNodes } = resolveNodeNameFilter(state.nodes, state.nodeNameFilter);
     const hasPreviewContent = effectiveNodes.length > 0 || Boolean(proxyProviders);
     const yaml = generateClashYaml(
-      buildGenerateClashYamlOptions(state, proxyProviders, effectiveNodes)
+      buildGenerateClashYamlOptions(state, proxyProviders, sortNodesBySource(effectiveNodes, state.sources, state.nodeSortMode))
     );
     return { yaml: hasPreviewContent ? yaml : "", error: null };
   } catch (error) {

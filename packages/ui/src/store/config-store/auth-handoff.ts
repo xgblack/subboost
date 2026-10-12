@@ -3,6 +3,7 @@ import { initialState } from "./definitions";
 import { safeParseJsonObject } from "@subboost/core/json";
 import { normalizeNodeNameFilterConfig } from "@subboost/core/subscription/node-name-filter";
 import { resolveProxyGroupAdvancedModeEnabled } from "@subboost/core/proxy-group-advanced-mode";
+import { normalizeNodeSortMode } from "@subboost/core/subscription/node-order";
 import { normalizeRuleModelFromConfig } from "@subboost/core/rules/rule-model";
 
 export const AUTH_CONFIG_HANDOFF_STORAGE_NAME = "subboost-auth-config-handoff";
@@ -147,6 +148,7 @@ function buildHandoffState(state: ConfigState): Partial<ConfigState> {
   return {
     sources: sourceArray(state.sources) ?? [],
     nodes: state.nodes,
+    nodeSortMode: state.nodeSortMode,
     nodeNameFilter: normalizeNodeNameFilterConfig(state.nodeNameFilter),
     deletedNodeNames: state.deletedNodeNames,
     deletedNodes: state.deletedNodes,
@@ -186,6 +188,7 @@ function normalizeHandoffState(raw: unknown): Partial<ConfigState> | null {
   if (sources) out.sources = sources;
   const nodes = objectArray<ConfigState["nodes"][number]>(raw.nodes);
   if (nodes) out.nodes = nodes;
+  out.nodeSortMode = normalizeNodeSortMode(raw.nodeSortMode);
   out.nodeNameFilter = normalizeNodeNameFilterConfig(raw.nodeNameFilter);
   const deletedNodeNames = stringArray(raw.deletedNodeNames);
   if (deletedNodeNames) out.deletedNodeNames = deletedNodeNames;

@@ -281,6 +281,7 @@ describe("createNodeActions", () => {
   it("moves nodes and applies absolute ordering with bounds checks", () => {
     const { actions, getState } = createHarness({
       nodes: [node("A"), node("B"), node("C")],
+      nodeSortMode: "legacy",
     });
 
     actions.moveNode("B", "up");
@@ -306,6 +307,7 @@ describe("createNodeActions", () => {
 
   it("reorders only scoped node slots while preserving hidden node positions", () => {
     const { actions, getState } = createHarness({
+      nodeSortMode: "legacy",
       nodes: [
         node("A"),
         node("Hidden 1"),

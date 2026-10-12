@@ -10,6 +10,8 @@ import { toast } from "@subboost/ui/components/ui/toaster";
 import { formatNodeNameFromTemplate } from "@subboost/core/node-name-template";
 import { cn } from "@subboost/ui/lib/utils";
 import type { ParsedNode } from "@subboost/core/types/node";
+import type { NodeSortMode } from "@subboost/core/subscription/node-order";
+import { SourceNodePositionInput } from "./source-node-position-input";
 
 type NodeNameParts = {
   baseName: string;
@@ -25,6 +27,7 @@ const NODE_LIST_HEIGHT_CLASS = "space-y-1 max-h-96 overflow-y-auto custom-scroll
 
 export function NodeManagementNodeList({
   nodes,
+  nodeSortMode,
   deletedMarkedNodes,
   visibleNodes,
   visibleDeletedMarkedNodes,
@@ -52,6 +55,7 @@ export function NodeManagementNodeList({
   restoreDeletedNode,
 }: {
   nodes: ParsedNode[];
+  nodeSortMode?: NodeSortMode;
   deletedMarkedNodes: DeletedMarkedNode[];
   visibleNodes: ParsedNode[];
   visibleDeletedMarkedNodes: DeletedMarkedNode[];
@@ -72,7 +76,7 @@ export function NodeManagementNodeList({
   orderDrafts: Record<string, string>;
   setOrderDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   nodeIndexByName: Map<string, number>;
-  setNodeOrder: (nodeName: string, order: number) => void;
+  setNodeOrder: (nodeName: string, order: number | null) => void;
   moveNode: (nodeName: string, direction: "up" | "down") => void;
   isListenerPortVisible: boolean;
   removeNode: (nodeName: string) => void;
@@ -239,6 +243,11 @@ export function NodeManagementNodeList({
                         )}
                         <span className="text-[10px] text-fg-40 whitespace-nowrap">顺序:</span>
                         <div className="flex items-center gap-0.5">
+                          {nodeSortMode === "source" ? (
+                            <SourceNodePositionInput node={node} position={(nodeIndexByName.get(node.name) ?? 0) + 1}
+                              nodeCount={nodes.length} orderDrafts={orderDrafts} setOrderDrafts={setOrderDrafts}
+                              setNodeOrder={setNodeOrder} />
+                          ) : (
                           <Input
                             value={
                               Object.prototype.hasOwnProperty.call(orderDrafts, node.name)
@@ -274,6 +283,7 @@ export function NodeManagementNodeList({
                             title="排序位置（1=最前）"
                             className="h-6 w-10 text-[10px] bg-ink/10 border-ink/10 text-center px-1"
                           />
+                          )}
                           <div className="flex flex-col">
                             <IconButton
                               label="上移节点"

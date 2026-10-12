@@ -1,4 +1,5 @@
 import { parseSubscription } from "@subboost/core/parser";
+import { normalizeNodeOrderMetadata } from "@subboost/core/subscription/node-order";
 import { stripImportedNodeControlFields } from "@subboost/core/subscription/imported-node-controls";
 import {
   keepOnlyValidNodeSourceIds,
@@ -130,6 +131,7 @@ export async function refreshNodeSnapshot(
     .map(normalizeNodeOriginName)
     .map((node) => keepOnlyValidNodeSourceIds(node, validSourceIds))
     .filter(Boolean) as ParsedNode[];
+  currentNodes = normalizeNodeOrderMetadata(currentNodes);
 
   const subscriptionInfo: SubscriptionResponseInfo = {};
   const profileWebPageUrlState: StableMetadataState = { conflicted: false };

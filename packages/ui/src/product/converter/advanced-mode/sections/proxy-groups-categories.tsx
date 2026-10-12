@@ -26,6 +26,7 @@ import {
 import type { EffectiveModuleRuleSource, HiddenPresetRuleIds } from "@subboost/core/generator/module-rules";
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
 import { resolveProxyGroupTargetName } from "@subboost/core/proxy-group-targets";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
 import { resolveNodeNameFilter } from "@subboost/core/subscription/node-name-filter";
 import { useConfigStore, type RuleSetDraft } from "@subboost/ui/store/config-store";
 import {
@@ -48,6 +49,8 @@ export function ProxyGroupsCategories() {
     ruleProviderBaseUrl,
     nodes = [],
     nodeNameFilter,
+    sources,
+    nodeSortMode,
     testUrl,
     testInterval,
     cnIpNoResolve,
@@ -92,8 +95,8 @@ export function ProxyGroupsCategories() {
   >(new Set(customProxyGroups.length > 0 ? [CUSTOM_CATEGORY_ID] : []));
   const didApplyCustomCategoryDefault = React.useRef(customProxyGroups.length > 0);
   const effectiveNodes = React.useMemo(
-    () => resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes,
-    [nodeNameFilter, nodes],
+    () => sortNodesBySource(resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes, sources, nodeSortMode),
+    [nodeNameFilter, nodes, sources, nodeSortMode],
   );
   const [editingModuleId, setEditingModuleId] = React.useState<string | null>(
     null,

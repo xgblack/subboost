@@ -14,6 +14,7 @@ import { PROXY_GROUP_MODULES, generateProxyGroups } from "@subboost/core/generat
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
 import { REGION_PRESETS } from "@subboost/core/proxy-group-advanced";
 import { getProxyGroupMemberKey } from "@subboost/core/proxy-group-targets";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
 import { resolveNodeNameFilter } from "@subboost/core/subscription/node-name-filter";
 import { getNodeSourceIds } from "@subboost/core/subscription/node-source-state";
 import { isSubscriptionInfoNodeName } from "@subboost/core/subscription/info-node-name";
@@ -140,6 +141,7 @@ export function ProxyGroupAdvancedPanel({
     nodes,
     nodeNameFilter,
     sources,
+    nodeSortMode,
     enabledProxyGroups,
     customProxyGroups,
     customRuleSets,
@@ -152,8 +154,8 @@ export function ProxyGroupAdvancedPanel({
   } = useConfigStore();
   const [draggingKey, setDraggingKey] = React.useState<string | null>(null);
   const effectiveNodes = React.useMemo(
-    () => resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes,
-    [nodeNameFilter, nodes],
+    () => sortNodesBySource(resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes, sources, nodeSortMode),
+    [nodeNameFilter, nodes, sources, nodeSortMode],
   );
   const effectiveNodeNameSet = React.useMemo(
     () => new Set(effectiveNodes.map((node) => node.name)),
@@ -531,6 +533,13 @@ export function ProxyGroupAdvancedPanel({
       <div className="mx-3 h-px bg-ink/10" />
 
       <div className="p-3">
+        {memberOrderRefs.length > 0 && (
+          <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-fg-50">
+            <span>本组使用自定义顺序</span>
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px]"
+              onClick={() => onChange({ memberOrder: [] })}>恢复全局顺序</Button>
+          </div>
+        )}
         <ProxyGroupMemberSectionHeader
           mode="included"
           nodeCount={includedNodeMembers.length}

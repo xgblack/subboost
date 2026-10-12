@@ -16,6 +16,7 @@ import {
 import { stripImportedNodeControlFieldsFromList } from "@subboost/core/subscription/imported-node-controls";
 import { buildProxyProvidersFromConfig } from "@subboost/core/subscription/proxy-providers";
 import { resolveNodeNameFilter } from "@subboost/core/subscription/node-name-filter";
+import { normalizeNodeSortMode, sortNodesBySource } from "./node-order";
 import { ensureCustomRuleId } from "@subboost/core/rules/custom-rule-utils";
 import { DEFAULT_SUBBOOST_CONFIG } from "@subboost/core/config/defaults";
 import { normalizeRuleModelFromConfig } from "@subboost/core/rules/rule-model";
@@ -341,7 +342,12 @@ export function buildGenerateOptionsFromConfig(
   const proxyGroupOrder = normalizeProxyGroupOrder(config.proxyGroupOrder);
   const effectiveNodes = resolveNodeNameFilter(opts.nodes, config.nodeNameFilter).effectiveNodes;
   const groupListeners = normalizeGroupListeners(config.groupListeners);
-  const sanitizedNodes = stripImportedNodeControlFieldsFromList(effectiveNodes);
+  const sanitizedNodes = stripImportedNodeControlFieldsFromList(sortNodesBySource(
+    effectiveNodes,
+    Array.isArray(config.sources) ? config.sources.filter((source): source is { id: string } =>
+      Boolean(source) && typeof source === "object" && typeof source.id === "string") : [],
+    normalizeNodeSortMode(config.nodeSortMode),
+  ));
   const proxyGroupAdvanced = isRecord(config.proxyGroupAdvanced)
     ? Object.fromEntries(
         Object.entries(config.proxyGroupAdvanced)

@@ -23,6 +23,9 @@ import {
 import { stripImportedNodeControlFieldsFromList } from "@subboost/core/subscription/imported-node-controls";
 import { getValidDialerRelayGroupNames } from "@subboost/core/subscription/dialer-relay-group-names";
 import { reconcileNodeNameReferences } from "@subboost/core/subscription/node-name-references";
+import { getNodeSourceOrder, SOURCE_ORDER_KEY } from "@subboost/core/subscription/node-order";
+import { prepareImportedNodeOrder } from "@subboost/core/subscription/source-node-order";
+import { mergeSourceNodeOrderBatch } from "./source-node-order";
 import { tryNormalizeSubscriptionUrlInput } from "@subboost/core/subscription/url-input";
 import type { ConfigActions, SubscriptionSource } from "./definitions";
 import {
@@ -115,7 +118,7 @@ export function createSourceActions(set: SetState, get: GetState, setAndGenerate
       const removed = new Set(Array.from(prevIds).filter((id) => !nextIds.has(id)));
 
       if (removed.size === 0) {
-        set({ sources });
+        setAndGenerateConfig(() => ({ sources }));
         return;
       }
 
@@ -155,7 +158,7 @@ export function createSourceActions(set: SetState, get: GetState, setAndGenerate
 
       try {
         const result: ParseResult = parseSubscription(content);
-        const sanitizedNodes = stripImportedNodeControlFieldsFromList(result.nodes);
+        const sanitizedNodes = stripImportedNodeControlFieldsFromList(result.nodes).map((node) => prepareImportedNodeOrder(node));
 
         setAndGenerateConfig((state) => {
           const normalizeOriginName = (node: ParsedNode): ParsedNode => {
@@ -522,8 +525,10 @@ export function createSourceActions(set: SetState, get: GetState, setAndGenerate
           const resolvedSubscriptionUserInfo = resolveSubscriptionUserInfo(subscriptionUserInfo, result.nodes);
           const currentTag = typeof source.tag === "string" ? source.tag.trim() : "";
           const currentNameTemplate = typeof source.nameTemplate === "string" ? source.nameTemplate.trim() : "";
+          if (result.nodes.length === 0 && result.errors.length > 0) throw new Error(result.errors[0]);
           allNodes.push(
             ...prepareSourceParsedNodes(result.nodes, {
+              sourceId: source.id,
               currentTag,
               currentNameTemplate,
             }).map((node) => withNodeSourceId(node, source.id))
@@ -596,7 +601,10 @@ export function createSourceActions(set: SetState, get: GetState, setAndGenerate
         }
         if (!changed) continue;
 
-        uniqueNodeMap.set(key, mergeNodeSourceIds(existing, mergedSourceIds));
+        uniqueNodeMap.set(key, {
+          ...mergeNodeSourceIds(existing, mergedSourceIds),
+          [SOURCE_ORDER_KEY]: { ...getNodeSourceOrder(existing), ...getNodeSourceOrder(node) },
+        });
       }
       const uniqueNodes = Array.from(uniqueNodeMap.values());
 
@@ -665,6 +673,7 @@ export function createSourceActions(set: SetState, get: GetState, setAndGenerate
           isLoading: false,
           listenerPorts: nextListenerPorts,
           dialerProxyGroups: nextDialerProxyGroups,
+          ...mergeSourceNodeOrderBatch(state, allNodes, sourceMeta),
           sources: state.sources.map((s) => {
             const meta = sourceMeta.get(s.id);
             if (!meta) return s;

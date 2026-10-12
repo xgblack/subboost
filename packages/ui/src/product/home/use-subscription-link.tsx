@@ -329,6 +329,7 @@ export function useSubscriptionLink({
             template,
             appliedTemplateId,
             smartNodeMatchingEnabled,
+            nodeSortMode: useConfigStore.getState().nodeSortMode,
             nodeNameFilter,
             // 用于“我的订阅 → 编辑”恢复输入源（保留 YAML/节点链接/多个 URL 的顺序）
             sources: storeSources

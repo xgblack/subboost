@@ -10,6 +10,7 @@ import { toast } from "@subboost/ui/components/ui/toaster";
 import { useProductInteractionAdapter, type ProductInteractionResult } from "@subboost/ui/product/interactions";
 import { markSourceAsPendingImport } from "@subboost/ui/product/subscription/source-import-state";
 import { moveSubscriptionSource } from "@subboost/ui/product/subscription/source-order";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
 
 export type SubscriptionSourcesMode = "quick" | "advanced";
 
@@ -62,7 +63,7 @@ function sourceMetaNeedsReimport(patch: Partial<SubscriptionSource>): boolean {
 }
 
 export function useSubscriptionSourcesController({ mode }: Options) {
-  const { nodes, parseErrors, sources, setSources, parseSingleSource } = useConfigStore();
+  const { nodes, nodeSortMode, parseErrors, sources, setSources, parseSingleSource } = useConfigStore();
   const { user } = useUserStore();
   const interactions = useProductInteractionAdapter();
 
@@ -113,7 +114,7 @@ export function useSubscriptionSourcesController({ mode }: Options) {
   );
   const nodesBySourceId = React.useMemo(() => {
     const grouped = new Map<string, ParsedNode[]>();
-    for (const node of nodes) {
+    for (const node of sortNodesBySource(nodes, sources, nodeSortMode)) {
       for (const sourceId of getNodeSourceIds(node)) {
         const current = grouped.get(sourceId);
         if (current) {
@@ -124,7 +125,7 @@ export function useSubscriptionSourcesController({ mode }: Options) {
       }
     }
     return grouped;
-  }, [nodes]);
+  }, [nodes, sources, nodeSortMode]);
 
   const closeExpandedSourceEditor = React.useCallback(() => {
     if (

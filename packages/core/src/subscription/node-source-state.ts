@@ -89,7 +89,7 @@ export function withoutNodeSourceIds(node: ParsedNode, removedSourceIds: Set<str
   if (nextSourceIds.length === 0) return null;
 
   const record = node as unknown as Record<string, unknown>;
-  return ({ ...record, [SOURCE_IDS_KEY]: nextSourceIds } as unknown as ParsedNode);
+  return pruneSourceOrder({ ...record, [SOURCE_IDS_KEY]: nextSourceIds } as unknown as ParsedNode, nextSourceIds);
 }
 
 export function keepOnlyValidNodeSourceIds(node: ParsedNode, validSourceIds: Set<string>): ParsedNode | null {
@@ -101,5 +101,11 @@ export function keepOnlyValidNodeSourceIds(node: ParsedNode, validSourceIds: Set
   if (nextSourceIds.length === sourceIds.length) return node;
 
   const record = node as unknown as Record<string, unknown>;
-  return ({ ...record, [SOURCE_IDS_KEY]: nextSourceIds } as unknown as ParsedNode);
+  return pruneSourceOrder({ ...record, [SOURCE_IDS_KEY]: nextSourceIds } as unknown as ParsedNode, nextSourceIds);
+}
+
+function pruneSourceOrder(node: ParsedNode, sourceIds: string[]): ParsedNode {
+  const order = node._sourceOrder;
+  if (!order || typeof order !== "object" || Array.isArray(order)) return node;
+  return { ...node, _sourceOrder: Object.fromEntries(Object.entries(order).filter(([id]) => sourceIds.includes(id))) };
 }

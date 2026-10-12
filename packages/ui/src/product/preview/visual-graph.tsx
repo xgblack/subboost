@@ -13,6 +13,7 @@ import {
 import { getModuleRuleOrderKey } from "@subboost/core/generator/module-rules";
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
 import { resolveProxyGroupTargetName } from "@subboost/core/proxy-group-targets";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
 import { resolveNodeNameFilter } from "@subboost/core/subscription/node-name-filter";
 import { collectCustomRoutingRuleSets } from "@subboost/core/rules/custom-routing-rule-sets";
 import { CustomRulesPreview } from "./visual-graph/custom-rules-preview";
@@ -30,6 +31,8 @@ export function VisualGraph() {
   const {
     nodes,
     nodeNameFilter,
+    sources,
+    nodeSortMode,
     enabledProxyGroups,
     dialerProxyGroups,
     customRules,
@@ -47,6 +50,8 @@ export function VisualGraph() {
     useShallow((state) => ({
       nodes: state.nodes,
       nodeNameFilter: state.nodeNameFilter,
+      sources: state.sources,
+      nodeSortMode: state.nodeSortMode,
       enabledProxyGroups: state.enabledProxyGroups,
       dialerProxyGroups: state.dialerProxyGroups ?? [],
       customRules: state.customRules ?? [],
@@ -63,8 +68,8 @@ export function VisualGraph() {
     })),
   );
   const effectiveNodes = React.useMemo(
-    () => resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes,
-    [nodeNameFilter, nodes],
+    () => sortNodesBySource(resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes, sources, nodeSortMode),
+    [nodeNameFilter, nodes, sources, nodeSortMode],
   );
   const rawNodeNameSet = React.useMemo(
     () => new Set(nodes.map((node) => node.name)),

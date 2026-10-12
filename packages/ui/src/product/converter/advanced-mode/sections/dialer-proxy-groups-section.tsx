@@ -21,6 +21,7 @@ import { DEFAULT_LOAD_BALANCE_STRATEGY, type ProxyGroupGroupType } from "@subboo
 import { PROXY_GROUP_MODULES } from "@subboost/core/generator/proxy-groups";
 import { resolveProxyGroupModuleName } from "@subboost/core/proxy-group-name";
 import { getValidDialerRelayGroupNames } from "@subboost/core/subscription/dialer-relay-group-names";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
 import { resolveNodeNameFilter } from "@subboost/core/subscription/node-name-filter";
 import { cn } from "@subboost/ui/lib/utils";
 import { useConfigStore, PRESET_RELAY_NAMES } from "@subboost/ui/store/config-store";
@@ -58,6 +59,8 @@ export function DialerProxyGroupsSection({
   const {
     nodes,
     nodeNameFilter,
+    sources,
+    nodeSortMode,
     dialerProxyGroups,
     customProxyGroups,
     enabledProxyGroups,
@@ -94,8 +97,8 @@ export function DialerProxyGroupsSection({
   );
   const interactions = useProductInteractionAdapter();
   const effectiveNodes = React.useMemo(
-    () => resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes,
-    [nodeNameFilter, nodes],
+    () => sortNodesBySource(resolveNodeNameFilter(nodes, nodeNameFilter).effectiveNodes, sources, nodeSortMode),
+    [nodeNameFilter, nodes, sources, nodeSortMode],
   );
   const rawNodeNameSet = React.useMemo(() => new Set(nodes.map((node) => node.name)), [nodes]);
   const effectiveNodeNameSet = React.useMemo(() => new Set(effectiveNodes.map((node) => node.name)), [effectiveNodes]);

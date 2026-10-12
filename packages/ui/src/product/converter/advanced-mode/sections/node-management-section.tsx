@@ -8,6 +8,8 @@ import { confirmDialog } from "@subboost/ui/components/ui/confirm-dialog";
 import { Input } from "@subboost/ui/components/ui/input";
 import { SwitchField } from "@subboost/ui/components/ui/switch-field";
 import { toast } from "@subboost/ui/components/ui/toaster";
+import { sortNodesBySource } from "@subboost/core/subscription/node-order";
+import { SourceNodeOrderControls } from "./node-management/source-node-order-controls";
 import { DEFAULT_NODE_NAME_TEMPLATE } from "@subboost/core/node-name-template";
 import {
   DEFAULT_NODE_NAME_FILTER_CONFIG,
@@ -63,6 +65,7 @@ export function NodeManagementSection({
   const {
     sources,
     nodes,
+    nodeSortMode,
     nodeNameFilter,
     deletedNodeNames,
     deletedNodes,
@@ -87,7 +90,10 @@ export function NodeManagementSection({
     () => resolveNodeNameFilter(nodes, normalizedNodeNameFilter),
     [nodes, normalizedNodeNameFilter]
   );
-  const effectiveNodes = nodeNameFilterResult.effectiveNodes;
+  const effectiveNodes = React.useMemo(
+    () => sortNodesBySource(nodeNameFilterResult.effectiveNodes, sources, nodeSortMode),
+    [nodeNameFilterResult.effectiveNodes, sources, nodeSortMode],
+  );
   const hasProxyProviders = React.useMemo(
     () => sources.some(canGenerateProxyProvider),
     [sources]
@@ -206,7 +212,12 @@ export function NodeManagementSection({
   }, [effectiveNodes, nodeSearchKeyword]);
 
   const setEffectiveNodeOrder = React.useCallback(
-    (nodeName: string, order: number) => {
+    (nodeName: string, order: number | null) => {
+      if (nodeSortMode === "source") {
+        setNodeOrder(nodeName, order);
+        return;
+      }
+      if (order === null) return;
       const currentIndex = nodeIndexByName.get(nodeName);
       if (currentIndex === undefined || !Number.isFinite(order)) return;
       const targetIndex = Math.max(
@@ -216,7 +227,7 @@ export function NodeManagementSection({
       if (targetIndex === currentIndex) return;
       setNodeOrder(nodeName, targetIndex + 1, effectiveNodeNames);
     },
-    [effectiveNodeNames, effectiveNodes.length, nodeIndexByName, setNodeOrder]
+    [effectiveNodeNames, effectiveNodes.length, nodeIndexByName, setNodeOrder, nodeSortMode]
   );
 
   const moveEffectiveNode = React.useCallback(
@@ -490,6 +501,7 @@ export function NodeManagementSection({
 
       {isExpanded && (
         <div className="mt-2 pl-6">
+          <SourceNodeOrderControls hasProxyProviders={hasProxyProviders} />
           <div className="flex flex-col gap-2 pb-2 pr-2 sm:flex-row sm:items-center">
             <div className="relative w-full sm:min-w-0 sm:flex-1">
               <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-fg-30" />
@@ -561,6 +573,7 @@ export function NodeManagementSection({
           />
 
           <NodeManagementNodeList
+            nodeSortMode={nodeSortMode}
             nodes={effectiveNodes}
             deletedMarkedNodes={deletedMarkedNodes}
             visibleNodes={visibleNodes}

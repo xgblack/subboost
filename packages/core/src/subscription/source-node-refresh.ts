@@ -11,6 +11,7 @@ import {
   withoutNodeSourceIds,
 } from "./node-source-state";
 import type { ParsedNode } from "../types/node";
+import { prepareImportedNodeOrder, refreshSourceNodeOrder } from "./source-node-order";
 
 export type SourceRefreshDescriptor = {
   sourceId: string;
@@ -42,13 +43,13 @@ function normalizeOptionalString(value: unknown): string | undefined {
 
 export function prepareSourceParsedNodes(
   nodes: ParsedNode[],
-  descriptor: Pick<SourceRefreshDescriptor, "currentTag" | "currentNameTemplate">
+  descriptor: Pick<SourceRefreshDescriptor, "currentTag" | "currentNameTemplate"> & { sourceId?: string }
 ): ParsedNode[] {
   const tag = normalizeOptionalString(descriptor.currentTag);
   const template = normalizeOptionalString(descriptor.currentNameTemplate);
 
-  return nodes.map((node) => {
-    const sanitizedNode = stripImportedNodeControlFields(node);
+  return nodes.map((node, index) => {
+    const sanitizedNode = prepareImportedNodeOrder(stripImportedNodeControlFields(node), descriptor.sourceId, index);
     const record = sanitizedNode as unknown as Record<string, unknown>;
     const originName = getNodeOriginName(sanitizedNode).trim();
 
@@ -89,6 +90,7 @@ export function mergeParsedSourceNodes(
   descriptor: SourceRefreshDescriptor
 ): MergeSourceNodesResult {
   const sourceId = descriptor.sourceId;
+  parsedNodes = parsedNodes.map((node, index) => prepareImportedNodeOrder(node, sourceId, index));
   const lastTag = normalizeOptionalString(descriptor.lastTag);
   const lastNameTemplate = normalizeOptionalString(descriptor.lastNameTemplate);
   const treatAsNewSource = descriptor.treatAsNewSource === true;
@@ -467,5 +469,5 @@ export function mergeParsedSourceNodes(
     if (oldName && finalName !== oldName) renameMap.set(oldName, finalName);
   }
 
-  return { nodes: nextNodes, renameMap };
+  return { nodes: refreshSourceNodeOrder(stateNodes, parsedNodes, nextNodes, descriptor, renameMap), renameMap };
 }

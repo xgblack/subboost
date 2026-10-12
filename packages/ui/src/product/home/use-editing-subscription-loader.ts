@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { normalizeNodeOrderMetadata, normalizeNodeSortMode } from "@subboost/core/subscription/node-order";
 import type { SubscriptionSource } from "@subboost/ui/store/config-store";
 import type { ParsedNode } from "@subboost/core/types/node";
 import type { EditingSubscriptionLoaderOptions } from "./editing-subscription-types";
@@ -508,7 +509,8 @@ export function useEditingSubscriptionLoader({
 
         useConfigStore.setState((state) => ({
           ...state,
-          nodes: hydratedNodes,
+          nodes: normalizeNodeOrderMetadata(hydratedNodes),
+          nodeSortMode: normalizeNodeSortMode(cfg.nodeSortMode),
           deletedNodeNames: deletedNodeNamesMerged.length > 0 ? deletedNodeNamesMerged : state.deletedNodeNames,
           deletedNodes:
             deletedNodesFromCfg.length > 0

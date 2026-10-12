@@ -3,6 +3,8 @@ import { formatNodeNameFromTemplate } from "@subboost/core/node-name-template";
 import type { ConfigActions } from "../definitions";
 import { makeUniqueName } from "../definitions";
 import type { GetState, SetAndGenerateConfig, SetState } from "../store-types";
+import { withNodeManualPosition } from "@subboost/core/subscription/node-order";
+import { createNodeOrderActions, nodePositionPatch } from "./node-order-actions";
 
 type NodeActions = Pick<
   ConfigActions,
@@ -12,6 +14,8 @@ type NodeActions = Pick<
   | "restoreNodeName"
   | "moveNode"
   | "setNodeOrder"
+  | "enableSourceNodeSorting"
+  | "clearManualNodePositions"
   | "renameNode"
   | "bulkRenameNodes"
   | "setListenerPort"
@@ -24,6 +28,7 @@ export function createNodeActions(
   setAndGenerateConfig: SetAndGenerateConfig
 ): NodeActions {
   return {
+    ...createNodeOrderActions(setAndGenerateConfig),
     clearNodes: () => {
       set({
         nodes: [],
@@ -141,7 +146,7 @@ export function createNodeActions(
             ? restoring.node
             : ({ ...restoredNodeRecord, name: restoredName } as unknown as ParsedNode);
 
-        const nextNodes = [...state.nodes, restoredNode];
+        const nextNodes = [...state.nodes, state.nodeSortMode === "source" ? withNodeManualPosition(restoredNode) : restoredNode];
 
         const nextListenerPorts = (() => {
           if (typeof restoring.listenerPort !== "number") return state.listenerPorts;
@@ -246,6 +251,7 @@ export function createNodeActions(
 
     moveNode: (nodeName: string, direction: "up" | "down") => {
       setAndGenerateConfig((state) => {
+        if (state.nodeSortMode === "source") return nodePositionPatch(state, nodeName, direction);
         const from = state.nodes.findIndex((n) => n.name === nodeName);
         if (from < 0) return state;
         const to = direction === "up" ? from - 1 : from + 1;
@@ -257,8 +263,10 @@ export function createNodeActions(
       });
     },
 
-    setNodeOrder: (nodeName: string, order: number, scopeNodeNames?: string[]) => {
+    setNodeOrder: (nodeName: string, order: number | null, scopeNodeNames?: string[]) => {
       setAndGenerateConfig((state) => {
+        if (state.nodeSortMode === "source") return nodePositionPatch(state, nodeName, order);
+        if (order === null) return state;
         if (!Number.isFinite(order)) return state;
 
         if (Array.isArray(scopeNodeNames)) {

@@ -18,6 +18,7 @@ import {
   type SubscriptionImportErrorInfo,
 } from "@subboost/core/subscription/import-error";
 import type { SubscriptionUserInfo } from "@subboost/core/subscription/subscription-userinfo";
+import type { NodeSortMode } from "@subboost/core/subscription/node-order";
 import { tryNormalizeSubscriptionUrlInput } from "@subboost/core/subscription/url-input";
 import {
   DEFAULT_NODE_NAME_FILTER_CONFIG,
@@ -169,6 +170,7 @@ export interface ConfigState {
   draftRevision: number;
   // 节点相关
   nodes: ParsedNode[];
+  nodeSortMode: NodeSortMode;
   deletedNodeNames: string[];
   deletedNodes: Array<{
     originName: string;
@@ -256,7 +258,9 @@ export interface ConfigActions {
   restoreNodeName: (nodeName: string) => void;
   restoreDeletedNode: (originName: string) => void;
   moveNode: (nodeName: string, direction: "up" | "down") => void;
-  setNodeOrder: (nodeName: string, order: number, scopeNodeNames?: string[]) => void;
+  setNodeOrder: (nodeName: string, order: number | null, scopeNodeNames?: string[]) => void;
+  enableSourceNodeSorting: () => void;
+  clearManualNodePositions: () => void;
   setNodeNameFilter: (config: NodeNameFilterConfig) => void;
 
   // 模板和配置
@@ -352,6 +356,7 @@ export interface ConfigActions {
 export const initialState: ConfigState = {
   draftRevision: 0,
   nodes: [],
+  nodeSortMode: "source",
   deletedNodeNames: [],
   deletedNodes: [],
   parseErrors: [],
