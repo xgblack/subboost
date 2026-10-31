@@ -5,7 +5,7 @@ import { getNodeManualPosition, normalizeNodeOrderMetadata, setManualNodePositio
 import { mergeParsedSourceNodes, prepareSourceParsedNodes } from "./source-node-refresh";
 import { buildGenerateOptionsFromConfig } from "./config-utils";
 import { generateClashYaml } from "../generator";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 
 const sources = ["A", "B", "C"].map((id) => ({ id }));
 const node = (name: string, extra: Record<string, unknown> = {}): ParsedNode => ({

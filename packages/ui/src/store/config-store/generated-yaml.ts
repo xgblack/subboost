@@ -73,6 +73,7 @@ function buildGenerateClashYamlOptions(
       listenerPorts: state.listenerPorts,
       testUrl: state.testUrl,
       testInterval: state.testInterval,
+      sharedHealthChecks: state.sharedHealthChecks,
       ruleProviderBaseUrl: state.ruleProviderBaseUrl,
       autoSelectStrategy: "url-test",
     },

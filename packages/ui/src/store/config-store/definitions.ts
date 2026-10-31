@@ -224,6 +224,7 @@ export interface ConfigState {
   allowLan: boolean;
   testUrl: string;
   testInterval: number;
+  sharedHealthChecks: boolean;
   ruleProviderBaseUrl: string;
   cnIpNoResolve: boolean;
   experimentalCnUseCnRuleSet: boolean;
@@ -319,6 +320,7 @@ export interface ConfigActions {
   setAllowLan: (allow: boolean) => void;
   setTestUrl: (url: string) => void;
   setTestInterval: (interval: number) => void;
+  setSharedHealthChecks: (enabled: boolean) => void;
   setRuleProviderBaseUrl: (url: string) => void;
   setProxyGroupAdvancedModeEnabled: (value: boolean) => void;
   setCnIpNoResolve: (value: boolean) => void;
@@ -391,6 +393,7 @@ export const initialState: ConfigState = {
   allowLan: DEFAULT_SUBBOOST_CONFIG.allowLan,
   testUrl: DEFAULT_SUBBOOST_CONFIG.testUrl,
   testInterval: DEFAULT_SUBBOOST_CONFIG.testInterval,
+  sharedHealthChecks: DEFAULT_SUBBOOST_CONFIG.sharedHealthChecks,
   ruleProviderBaseUrl: DEFAULT_SUBBOOST_CONFIG.ruleProviderBaseUrl,
   cnIpNoResolve: DEFAULT_SUBBOOST_CONFIG.cnIpNoResolve,
   experimentalCnUseCnRuleSet: DEFAULT_SUBBOOST_CONFIG.experimentalCnUseCnRuleSet,
