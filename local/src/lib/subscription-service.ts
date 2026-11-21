@@ -8,6 +8,8 @@ import {
   buildManualRefreshFailureResponse,
   buildManualRefreshSuccessResponseBody,
   createResetSubscriptionAutoUpdateState,
+  normalizeSavedSourcesForPersistence,
+  resolveSubscriptionAutoUpdateState,
   normalizeSubscriptionConfigForPersistence,
   normalizeSubscriptionInfoForPersistence,
   normalizeSubscriptionName,
@@ -18,13 +20,16 @@ import {
   serializeSubscriptionSummaryData,
   validateSubscriptionNodeList,
   type SavedSource,
-  type RefreshNodeSnapshotResult,
 } from "@subboost/server-core/subscription";
 import { decryptJson, decryptJsonObject, encryptJson } from "./crypto";
 import { getAppUrl } from "./env";
 import { prisma } from "./prisma";
 import { fetchSourceUserInfoHeadersDirect, importSourceUrlDirect } from "./source-import";
 import { normalizeLocalAutoUpdateIntervalSeconds } from "./auto-update-policy";
+import { getNodeSourceIds } from "@subboost/core/subscription/node-source-state";
+import { buildLocalManualRefreshState } from "./auto-update-source-policy";
+import { withSubscriptionRefreshLease } from "./subscription-refresh-lock";
+import { persistSubscriptionRefresh, syncSourceUpdateStates } from "./subscription-source-update-store";
 
 export const MAX_NODES_PER_SUBSCRIPTION = 10000;
 export const CACHE_TTL_SECONDS = 3600;
@@ -284,14 +289,22 @@ export async function updateSubscription(ownerId: string, id: string, body: unkn
       await tx.subscriptionAutoUpdateState.upsert({
         where: { subscriptionId: current.id },
         create: { subscriptionId: current.id },
-        update: createResetSubscriptionAutoUpdateState(),
+        update: { ...createResetSubscriptionAutoUpdateState(), lastAttemptedAt: current.autoUpdateState?.lastAttemptedAt ?? current.lastUpdatedAt ?? current.createdAt },
       });
     }
-    return tx.subscription.update({
-      where: { id: current.id },
+    const updated = await tx.subscription.update({
+      where: { id: current.id, updatedAt: current.updatedAt },
       data,
       include: { autoUpdateState: true },
     });
+    if (hasUrls || hasNodes || hasConfig) {
+      await syncSourceUpdateStates(tx, current.id,
+        normalizeSavedSourcesForPersistence(currentSecrets.config.sources, { fallbackUrls: currentSecrets.urls }),
+        normalizeSavedSourcesForPersistence(nextConfig.sources, {
+          fallbackUrls: hasUrls ? normalizeSubscriptionUrlList(body.urls) : currentSecrets.urls,
+        }), nextNodes);
+    }
+    return updated;
   });
   return formatSubscription(row);
 }
@@ -359,88 +372,90 @@ export function buildSubscriptionCacheExpiry(from: Date): Date {
   return new Date(from.getTime() + CACHE_TTL_SECONDS * 1000);
 }
 
-async function persistRefreshSuccess(params: {
-  subscriptionId: string;
-  expectedUpdatedAt: Date;
-  snapshot: RefreshNodeSnapshotResult;
-  config: Record<string, unknown>;
-  cachedAt: Date;
-}): Promise<boolean> {
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.subscription.updateMany({
-      where: { id: params.subscriptionId, updatedAt: params.expectedUpdatedAt },
-      data: {
-        encryptedNodes: encryptJson(params.snapshot.nodes),
-        encryptedConfig: encryptJson(params.config),
-        encryptedSubscriptionInfo: encryptJson(params.snapshot.subscriptionInfo),
-        lastUpdatedAt: params.cachedAt,
-        cacheExpiresAt: buildSubscriptionCacheExpiry(params.cachedAt),
-        updatedAt: params.cachedAt,
+export async function refreshSubscription(ownerId: string, id: string, options: { targetSourceId?: string } = {}) {
+  const exists = await prisma.subscription.findFirst({ where: { id, ownerId }, select: { id: true } });
+  if (!exists) return null;
+  const errorResponse = (error: string, code: string, status: number) => ({
+    ok: false as const, response: { body: { error, code }, status },
+  });
+  const locked = await withSubscriptionRefreshLease(id, async (lease) => {
+    const row = await prisma.subscription.findFirst({ where: { id, ownerId }, include: { autoUpdateState: true } });
+    if (!row) return null;
+    const secrets = readSubscriptionSecrets(row);
+    const targetSourceId = options.targetSourceId;
+    if (targetSourceId) {
+      const sources = normalizeSavedSourcesForPersistence(secrets.config.sources, { fallbackUrls: secrets.urls });
+      const target = sources.find((source) => source.id === targetSourceId);
+      if (!target) return errorResponse("订阅源不存在。", "NOT_FOUND", 404);
+      if (target.useProxyProviders) return errorResponse("该订阅源由客户端更新。", "CLIENT_MANAGED_SOURCE", 400);
+      if (secrets.nodes.some((node) => getNodeSourceIds(node).length === 0) && !secrets.nodes.some((node) => getNodeSourceIds(node).includes(targetSourceId))) {
+        return errorResponse("旧节点缺少来源归属，请先在编辑页重新导入该源并保存。", "SOURCE_OWNERSHIP_REQUIRED", 409);
+      }
+    }
+    const attemptedAt = new Date();
+    const snapshot = await refreshNodeSnapshot({
+      config: secrets.config, urls: secrets.urls, storedNodes: secrets.nodes, targetSourceId,
+      ...buildSubscriptionFetchCallbacks(),
+    });
+    if (targetSourceId) {
+      // These response fields have no per-source provenance in existing subscriptions.
+      delete snapshot.subscriptionInfo.profileWebPageUrl;
+      delete snapshot.subscriptionInfo.planName;
+      if (typeof secrets.subscriptionInfo.profileWebPageUrl === "string") snapshot.subscriptionInfo.profileWebPageUrl = secrets.subscriptionInfo.profileWebPageUrl;
+      if (typeof secrets.subscriptionInfo.planName === "string") snapshot.subscriptionInfo.planName = secrets.subscriptionInfo.planName;
+    }
+    const currentState = resolveSubscriptionAutoUpdateState(row);
+    const scheduleMark = currentState.lastAttemptedAt ?? row.lastUpdatedAt ?? row.createdAt;
+    let refreshResult: ReturnType<typeof prepareRefreshCacheResult>;
+    try {
+      refreshResult = prepareRefreshCacheResult({ config: secrets.config, snapshot, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
+    } catch {
+      const persisted = await persistSubscriptionRefresh({
+        subscriptionId: id, expectedUpdatedAt: row.updatedAt, lease,
+        state: buildLocalManualRefreshState({ currentState, snapshot, attemptedAt, scheduleMark, targetSourceId, applied: false }),
+        sourceUpdates: { snapshot, trigger: targetSourceId ? "manual_source" : "manual_all", applied: false, unappliedReason: "聚合配置生成失败，本次结果未应用" },
+      });
+      return persisted ? errorResponse("聚合配置生成失败，已保留原配置。", "CONFIG_GENERATION_FAILED", 500)
+        : errorResponse("Subscription changed while refresh was in progress.", "SUBSCRIPTION_CHANGED", 409);
+    }
+    const cachedAt = new Date();
+    const persisted = await persistSubscriptionRefresh({
+      subscriptionId: row.id, expectedUpdatedAt: row.updatedAt, lease,
+      state: buildLocalManualRefreshState({ currentState, snapshot, attemptedAt, scheduleMark, targetSourceId, applied: refreshResult.ok }),
+      data: refreshResult.ok ? {
+        encryptedNodes: encryptJson(refreshResult.cacheEntry.nodes),
+        encryptedConfig: encryptJson(refreshResult.refreshedConfig),
+        encryptedSubscriptionInfo: encryptJson(refreshResult.cacheEntry.subscriptionInfo),
+        lastUpdatedAt: cachedAt, cacheExpiresAt: buildSubscriptionCacheExpiry(cachedAt),
+      } : {},
+      sourceUpdates: {
+        snapshot, trigger: targetSourceId ? "manual_source" : "manual_all", applied: refreshResult.ok,
+        unappliedReason: !refreshResult.ok && refreshResult.reason === "node_quota_exceeded"
+          ? "节点数量超过配额，本次结果未应用" : "聚合结果没有可用节点，本次结果未应用",
       },
     });
-    if (updated.count !== 1) return false;
-    await tx.subscriptionAutoUpdateState.upsert({
-      where: { subscriptionId: params.subscriptionId },
-      create: { subscriptionId: params.subscriptionId },
-      update: createResetSubscriptionAutoUpdateState(),
-    });
-    return true;
-  });
-}
-
-export async function refreshSubscription(ownerId: string, id: string) {
-  const row = await prisma.subscription.findFirst({ where: { id, ownerId }, include: { autoUpdateState: true } });
-  if (!row) return null;
-
-  const secrets = readSubscriptionSecrets(row);
-  const snapshot = await refreshNodeSnapshot({
-    config: secrets.config,
-    urls: secrets.urls,
-    storedNodes: secrets.nodes,
-    ...buildSubscriptionFetchCallbacks(),
-  });
-  const refreshResult = prepareRefreshCacheResult({
-    config: secrets.config,
-    snapshot,
-    maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION,
-  });
-
-  if (!refreshResult.ok) {
+    if (!persisted) return errorResponse("Subscription changed while refresh was in progress.", "SUBSCRIPTION_CHANGED", 409);
+    const sourceUpdate = targetSourceId ? await prisma.subscriptionSourceUpdateLog.findFirst({
+      where: { subscriptionId: row.id, sourceId: targetSourceId },
+      orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+      select: { id: true, result: true, nodeCountAfter: true, warningCount: true, errorMessage: true },
+    }) : null;
+    if (!refreshResult.ok) {
+      const response = buildManualRefreshFailureResponse({ refreshResult, maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION });
+      return { ok: false as const, response: targetSourceId ? { ...response, body: {
+        ...response.body,
+        ...(refreshResult.reason === "all_sources_failed" ? { error: `${sourceUpdate?.errorMessage ?? "订阅源更新失败"}，已保留原有节点。` } : {}),
+        historyRecordId: sourceUpdate?.id ?? null,
+      } } : response };
+    }
     return {
-      ok: false as const,
-      response: buildManualRefreshFailureResponse({
-        refreshResult,
-        maxNodesPerSubscription: MAX_NODES_PER_SUBSCRIPTION,
-      }),
-    };
-  }
-
-  const cachedAt = new Date();
-  const persisted = await persistRefreshSuccess({
-    subscriptionId: row.id,
-    expectedUpdatedAt: row.updatedAt,
-    snapshot,
-    config: refreshResult.refreshedConfig,
-    cachedAt,
-  });
-  if (!persisted) {
-    return {
-      ok: false as const,
-      response: {
-        body: { error: "Subscription changed while refresh was in progress.", code: "SUBSCRIPTION_CHANGED" },
-        status: 409,
+      ok: true as const,
+      body: { ...buildManualRefreshSuccessResponseBody({ subscriptionId: row.id, refreshResult, snapshot, cachedAt }),
+        ...(sourceUpdate ? { sourceUpdate } : {}),
       },
     };
-  }
-  return {
-    ok: true as const,
-    body: buildManualRefreshSuccessResponseBody({
-      subscriptionId: row.id,
-      refreshResult,
-      snapshot,
-      cachedAt,
-    }),
-  };
+  });
+  return locked.busy ? errorResponse("该聚合订阅正在更新，请稍后重试。", "REFRESH_BUSY", 409) : locked.value;
 }
 
 export async function generateSubscriptionYaml(token: string): Promise<GeneratedSubscriptionYaml | null> {
@@ -456,7 +471,8 @@ export async function generateSubscriptionYaml(token: string): Promise<Generated
       proxyProviders,
     })
   );
-  await prisma.subscription.update({ where: { id: row.id }, data: { lastAccessedAt: new Date() } });
+  // Access bookkeeping must not advance the configuration version used by refresh CAS.
+  await prisma.$executeRaw`UPDATE "Subscription" SET "lastAccessedAt" = ${new Date()} WHERE "id" = ${row.id}`;
   return {
     yaml,
     name: row.name,

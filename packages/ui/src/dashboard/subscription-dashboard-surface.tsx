@@ -68,6 +68,7 @@ export type DashboardSurfaceAdapter = {
   renderAnnouncement?: (context: { user: User }) => React.ReactNode;
   renderHeaderActions?: (context: { user: User }) => React.ReactNode;
   renderExtraQuickActions?: (context: { user: User }) => React.ReactNode;
+  renderSubscriptionActions?: (context: { subscription: Subscription; onUpdated: () => Promise<void> }) => React.ReactNode;
   beforeStatsSlot?: React.ReactNode;
 };
 
@@ -403,6 +404,7 @@ export function SubscriptionDashboardSurface({ adapter }: Props) {
                   onDownload={downloadSubscription}
                   onRefresh={refreshSubscription}
                   onSettings={openSubscriptionSettings}
+                  extraActions={adapter.renderSubscriptionActions?.({ subscription: sub, onUpdated: fetchSubscriptions })}
                 />
               ))}
             </div>
@@ -497,8 +499,10 @@ function SubscriptionRow({
   onDownload,
   onRefresh,
   onSettings,
+  extraActions,
 }: {
   sub: Subscription;
+  extraActions?: React.ReactNode;
   copiedId: string | null;
   refreshingId: string | null;
   editHref: string;
@@ -579,6 +583,7 @@ function SubscriptionRow({
           <RefreshCw className={`h-4 w-4 ${refreshingId === sub.id ? "animate-spin" : ""}`} />
           <span className="hidden sm:inline">刷新</span>
         </Button>
+        {extraActions}
         <Button
           variant="ghost"
           size="sm"

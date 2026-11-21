@@ -5,6 +5,7 @@ import {
 } from "@subboost/ui/dashboard/subscription-dashboard-surface";
 import { readJsonResponse } from "@subboost/ui/product/client-response";
 import type { RefreshSubscriptionResponse, Subscription, SubscriptionLink } from "@subboost/ui/dashboard/dashboard-types";
+import { SubscriptionSourcesAction } from "@local/components/subscription-sources-action";
 import { LOCAL_AUTO_UPDATE_POLICY } from "@local/lib/auto-update-policy";
 
 function resolveLocalDashboardDownloadUrl(subscription: Subscription): string {
@@ -58,6 +59,7 @@ const localDashboardAdapter: DashboardSurfaceAdapter = {
     return data.subscription;
   },
   resolveDownloadUrl: resolveLocalDashboardDownloadUrl,
+  renderSubscriptionActions: ({ subscription, onUpdated }) => <SubscriptionSourcesAction subscription={subscription} onUpdated={onUpdated} />,
 };
 
 export default function DashboardPage() {

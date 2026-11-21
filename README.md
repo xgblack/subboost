@@ -26,6 +26,12 @@
 - **DNS leak prevention**: The default `basic and DNS configuration` helps prevent DNS leaks.
 - **Automatic refresh**: Refresh subscriptions on a schedule and intelligently match nodes during refresh.
 
+## Self-hosted Source Updates
+
+Use **订阅源** in a subscription's action row to inspect per-source status and history or refresh one saved source. Successful updates apply directly to the aggregate without changing its link. Failed sources retain their previous nodes while other sources continue updating; repeated upstream failures no longer disable aggregate automatic updates. Node quota protection remains in place, and proxy providers continue to be fetched by the client.
+
+History starts with updates performed after upgrading and retains the latest 200 records per source. Re-enable automatic updates in the existing settings if an older version disabled them. Deployment applies the additive database migration; source installations can run `npm --prefix local run db:migrate` first.
+
 ## Interface Preview
 
 <p align="center">

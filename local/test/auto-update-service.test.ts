@@ -5,6 +5,9 @@ import { runLocalSubscriptionAutoUpdateCron } from "@local/lib/auto-update-servi
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
+  findUnique: vi.fn(),
+  queryRaw: vi.fn(),
+  executeRaw: vi.fn(),
   updateMany: vi.fn(async () => ({ count: 1 })),
   upsert: vi.fn(async (args) => args),
   transaction: vi.fn(),
@@ -24,12 +27,15 @@ vi.mock("@local/lib/prisma", () => ({
   prisma: {
     subscription: {
       findMany: dbMocks.findMany,
+      findUnique: dbMocks.findUnique,
       updateMany: dbMocks.updateMany,
     },
     subscriptionAutoUpdateState: {
       upsert: dbMocks.upsert,
     },
     $transaction: dbMocks.transaction,
+    $queryRaw: dbMocks.queryRaw,
+    $executeRaw: dbMocks.executeRaw,
   },
 }));
 
@@ -77,8 +83,12 @@ beforeEach(() => {
   vi.mocked(prisma.subscription.updateMany).mockClear();
   vi.mocked(prisma.subscriptionAutoUpdateState.upsert).mockClear();
   vi.mocked(prisma.$transaction).mockClear();
+  dbMocks.findUnique.mockResolvedValue(subscription());
+  dbMocks.queryRaw.mockResolvedValue([{ id: "sub-1", name: "subscription-refresh:sub-1", ownerToken: "test", expiresAt: new Date(Date.now() + 300000) }]);
+  dbMocks.executeRaw.mockResolvedValue(1);
   dbMocks.updateMany.mockResolvedValue({ count: 1 });
   dbMocks.transaction.mockImplementation(async (callback) => callback({
+    $queryRaw: dbMocks.queryRaw,
     subscription: { updateMany: dbMocks.updateMany },
     subscriptionAutoUpdateState: { upsert: dbMocks.upsert },
   }));

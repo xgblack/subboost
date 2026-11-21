@@ -54,6 +54,8 @@ model Subscription {
 
   owner           LocalAdmin                   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   autoUpdateState SubscriptionAutoUpdateState?
+  sourceUpdateStates SubscriptionSourceUpdateState[]
+  sourceUpdateLogs SubscriptionSourceUpdateLog[]
 
   @@index([ownerId])
   @@index([lastUpdatedAt])
@@ -85,6 +87,58 @@ model JobLeaseLock {
   updatedAt  DateTime @updatedAt
 
   @@index([expiresAt])
+}
+
+enum SubscriptionSourceUpdateResult {
+  applied
+  unchanged
+  failed
+  not_applied
+}
+
+enum SubscriptionSourceUpdateTrigger {
+  automatic
+  manual_all
+  manual_source
+}
+
+model SubscriptionSourceUpdateState {
+  subscriptionId   String
+  sourceId         String
+  lastAttemptedAt  DateTime
+  lastResult       SubscriptionSourceUpdateResult
+  lastSuccessfulAt DateTime?
+  lastError        String? @db.VarChar(240)
+  nodeCount        Int
+  warningCount     Int @default(0)
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@id([subscriptionId, sourceId])
+}
+
+model SubscriptionSourceUpdateLog {
+  id              String @id @default(cuid())
+  subscriptionId  String
+  sourceId        String
+  sourceType      String
+  sourceLabel     String @db.VarChar(240)
+  trigger         SubscriptionSourceUpdateTrigger
+  startedAt       DateTime
+  completedAt     DateTime
+  durationMs      Int
+  result          SubscriptionSourceUpdateResult
+  nodeCountBefore Int
+  nodeCountAfter  Int
+  nodesChanged    Boolean
+  warningCount    Int @default(0)
+  errorCategory   String?
+  httpStatus      Int?
+  errorMessage    String? @db.VarChar(240)
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([subscriptionId, sourceId, completedAt, id], map: "SubscriptionSourceUpdateLog_source_history_idx")
 }
 
 model RevokedSession {

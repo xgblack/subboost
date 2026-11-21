@@ -2,6 +2,7 @@ import { parseSubscription } from "@subboost/core/parser";
 import { normalizeNodeOrderMetadata } from "@subboost/core/subscription/node-order";
 import { stripImportedNodeControlFields } from "@subboost/core/subscription/imported-node-controls";
 import {
+  getNodeSourceIds,
   keepOnlyValidNodeSourceIds,
   normalizeNodeOriginName,
 } from "@subboost/core/subscription/node-source-state";
@@ -23,7 +24,7 @@ import {
   pickSubscriptionResponseInfoFromHeaders,
   type SubscriptionResponseInfo,
 } from "@subboost/core/subscription/subscription-response-info";
-import type { SubscriptionImportErrorCategory } from "@subboost/core/subscription/import-error";
+import { isSubscriptionImportError, type SubscriptionImportErrorCategory } from "@subboost/core/subscription/import-error";
 import type { ParsedNode } from "@subboost/core/types/node";
 import { composeNodeNameRenameMaps } from "@subboost/core/subscription/node-name-references";
 import { normalizeSavedSourcesForPersistence, type SavedSource, type SavedSourceType } from "./saved-sources";
@@ -58,11 +59,29 @@ export type RefreshNodeSnapshotOptions = {
   config: Record<string, unknown>;
   urls: string[];
   storedNodes: ParsedNode[];
+  /** Restrict execution, while retaining the full source list for ownership and metadata. */
+  targetSourceId?: string;
   fetchUrlNodes: (source: SavedSource) => Promise<UrlNodeFetchResult>;
   fetchUrlUserInfo?: (source: SavedSource) => Promise<Record<string, string> | undefined>;
 };
 
+export type RefreshNodeSnapshotSourceResult = {
+  sourceId: string;
+  type: SavedSourceType;
+  startedAt: Date;
+  completedAt: Date;
+  outcome: "refreshed" | "failed";
+  nodeCountBefore: number;
+  nodeCountAfter: number;
+  nodesChanged: boolean;
+  durationMs: number;
+  warningCount: number;
+  errorCategory?: SubscriptionImportErrorCategory;
+  httpStatus?: number;
+};
+
 export type RefreshNodeSnapshotResult = {
+  sourceResults?: RefreshNodeSnapshotSourceResult[];
   nodes: ParsedNode[];
   renameMap?: ReadonlyMap<string, string>;
   subscriptionInfo: SubscriptionResponseInfo;
@@ -120,6 +139,10 @@ export async function refreshNodeSnapshot(
   const savedSources = normalizeSavedSourcesForPersistence(options.config.sources, {
     fallbackUrls: options.urls,
   });
+  if (options.targetSourceId && !savedSources.some((source) => source.id === options.targetSourceId)) {
+    throw new Error("Import source not found.");
+  }
+  const selected = (source: SavedSource) => !options.targetSourceId || source.id === options.targetSourceId;
   let refreshedSavedSources = savedSources.map((source) => ({ ...source }));
   const validSourceIds = new Set(savedSources.map((source) => source.id));
   const deletedNodeNames = getDeletedNodeNames(options.config);
@@ -136,7 +159,7 @@ export async function refreshNodeSnapshot(
   const subscriptionInfo: SubscriptionResponseInfo = {};
   const profileWebPageUrlState: StableMetadataState = { conflicted: false };
   const planNameState: StableMetadataState = { conflicted: false };
-  const attemptedUrlFetch = savedSources.some((source) => source.type === "url" && !source.useProxyProviders);
+  const attemptedUrlFetch = savedSources.some((source) => selected(source) && source.type === "url" && !source.useProxyProviders);
   let usedUrlFetch = false;
   let refreshableSourceCount = 0;
   let refreshedSourceCount = 0;
@@ -145,6 +168,8 @@ export async function refreshNodeSnapshot(
   let detachedSourceCount = 0;
   let failedSourceCount = 0;
   const failedSources: RefreshNodeSnapshotFailedSource[] = [];
+  const sourceResults: RefreshNodeSnapshotSourceResult[] = [];
+  const resultBySource = new Map<string, RefreshNodeSnapshotSourceResult>();
   let renameMap = new Map<string, string>();
 
   const recordFailedSource = (
@@ -157,6 +182,12 @@ export async function refreshNodeSnapshot(
     } = {}
   ) => {
     failedSourceCount += 1;
+    const result = resultBySource.get(source.id);
+    if (result) {
+      result.outcome = "failed";
+      result.errorCategory = extra.errorCategory;
+      result.httpStatus = extra.httpStatus;
+    }
     failedSources.push({
       id: source.id,
       type: source.type,
@@ -181,22 +212,6 @@ export async function refreshNodeSnapshot(
       refreshedSavedSources = refreshedSavedSources.map((source, i) =>
         i === index ? { ...source, subscriptionUserInfo: normalized } : source
       );
-      return;
-    }
-
-    refreshedSavedSources = refreshedSavedSources.map((source, i) => {
-      if (i !== index) return source;
-      const next = { ...source };
-      delete next.subscriptionUserInfo;
-      return next;
-    });
-  };
-
-  const mergeSourceSubscriptionInfo = (sourceId: string, info: SubscriptionUserInfo | undefined) => {
-    updateSourceSubscriptionInfo(sourceId, info);
-    const normalized = normalizeSubscriptionUserInfo(info);
-    if (hasSubscriptionUserInfo(normalized)) {
-      mergeSubscriptionUserInfo(subscriptionInfo, normalized);
     }
   };
 
@@ -204,7 +219,37 @@ export async function refreshNodeSnapshot(
     return Boolean(source.userinfoUrl || source.userinfoUserAgent);
   };
 
+  const expectedFetchError = (error: unknown): string | null => {
+    if (isSubscriptionImportError(error)) return error.info.message;
+    if (!(error instanceof Error)) return null;
+    if (error.name === "AbortError" || error.name === "TimeoutError") return "订阅源请求超时";
+    const code = (error as Error & { code?: string; cause?: { code?: string } }).code
+      ?? (error as Error & { cause?: { code?: string } }).cause?.code;
+    return typeof code === "string" && /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ESOCKETTIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|UNABLE_TO_VERIFY_LEAF_SIGNATURE)$/.test(code)
+      ? `订阅源请求失败 ${code}` : null;
+  };
+
+  const fetchSupplementalInfo = async (source: SavedSource) => {
+    const startedAt = Date.now();
+    const result = resultBySource.get(source.id);
+    try {
+      const headers = await options.fetchUrlUserInfo?.(source);
+      if (result && shouldFetchSupplementalUserInfoForSource(source) && !headers?.["subscription-userinfo"]) result.warningCount += 1;
+      return headers;
+    } catch (error) {
+      if (!expectedFetchError(error)) throw error;
+      if (result) result.warningCount += 1;
+      return undefined;
+    } finally {
+      if (result) {
+        result.completedAt = new Date();
+        result.durationMs += Date.now() - startedAt;
+      }
+    }
+  };
+
   for (const source of savedSources) {
+    if (!selected(source)) continue;
     if (source.type === "url" && source.useProxyProviders) {
       const detached = detachSourceNodesFromState(currentNodes, source.id);
       if (detached.nodes.length !== currentNodes.length) {
@@ -216,11 +261,11 @@ export async function refreshNodeSnapshot(
         typeof options.fetchUrlUserInfo === "function" &&
         shouldFetchSupplementalUserInfoForSource(source)
       ) {
-        const headers = await options.fetchUrlUserInfo(source);
+        const headers = await fetchSupplementalInfo(source);
         if (headers) {
           mergeResponseMetadata(headers);
           const header = headers["subscription-userinfo"];
-          mergeSourceSubscriptionInfo(
+          updateSourceSubscriptionInfo(
             source.id,
             header ? resolveSubscriptionUserInfo(parseSubscriptionUserInfo(header)) : undefined
           );
@@ -230,74 +275,89 @@ export async function refreshNodeSnapshot(
     }
 
     refreshableSourceCount += 1;
+    const result: RefreshNodeSnapshotSourceResult = {
+      sourceId: source.id, type: source.type,
+      startedAt: new Date(), completedAt: new Date(), outcome: "refreshed",
+      nodeCountBefore: 0, nodeCountAfter: 0, nodesChanged: false, durationMs: 0, warningCount: 0,
+    };
+    sourceResults.push(result);
+    resultBySource.set(source.id, result);
+    try {
+      if (source.type === "url") {
+        let fetched: UrlNodeFetchResult;
+        try {
+          fetched = await options.fetchUrlNodes(source);
+        } catch (error) {
+          const message = expectedFetchError(error);
+          if (!message) throw error;
+          recordFailedSource(source, message, { errorCategory: "network" });
+          continue;
+        }
+        result.warningCount += fetched.errors?.length ?? 0;
+        mergeResponseMetadata(fetched.headers);
+        const userInfoHeader = fetched.headers?.["subscription-userinfo"];
+        const rawUserInfo = userInfoHeader ? parseSubscriptionUserInfo(userInfoHeader) : undefined;
+        const resolvedUserInfo = resolveSubscriptionUserInfo(
+          rawUserInfo,
+          fetched.ok ? fetched.nodes : []
+        );
+        if (!fetched.ok || fetched.nodes.length === 0) {
+          const errorInfo = fetched.errorInfo ?? null;
+          const firstParseError =
+            Array.isArray(fetched.errors) && typeof fetched.errors[0] === "string"
+              ? fetched.errors[0]
+              : null;
+          const errorMessage =
+            errorInfo?.detail ||
+            errorInfo?.message ||
+            fetched.error ||
+            firstParseError ||
+            "未解析到可用节点";
+          recordFailedSource(source, errorMessage, {
+            errorCategory: errorInfo?.category ?? (firstParseError ? "parse" : undefined),
+            httpStatus: errorInfo?.httpStatus ?? fetched.responseStatus,
+            publicReason: fetched.publicReason ?? null,
+          });
+          continue;
+        }
+        updateSourceSubscriptionInfo(source.id, resolvedUserInfo);
 
-    if (source.type === "url") {
-      const fetched = await options.fetchUrlNodes(source);
-      mergeResponseMetadata(fetched.headers);
-      const userInfoHeader = fetched.headers?.["subscription-userinfo"];
-      const rawUserInfo = userInfoHeader ? parseSubscriptionUserInfo(userInfoHeader) : undefined;
-      const resolvedUserInfo = resolveSubscriptionUserInfo(
-        rawUserInfo,
-        fetched.ok ? fetched.nodes : []
-      );
-      if (hasSubscriptionUserInfo(resolvedUserInfo)) {
-        mergeSubscriptionUserInfo(subscriptionInfo, resolvedUserInfo);
-      }
-
-      if (!fetched.ok || fetched.nodes.length === 0) {
-        const errorInfo = fetched.errorInfo ?? null;
-        const firstParseError =
-          Array.isArray(fetched.errors) && typeof fetched.errors[0] === "string"
-            ? fetched.errors[0]
-            : null;
-        const errorMessage =
-          errorInfo?.detail ||
-          errorInfo?.message ||
-          fetched.error ||
-          firstParseError ||
-          "未解析到可用节点";
-        recordFailedSource(source, errorMessage, {
-          errorCategory: errorInfo?.category ?? (firstParseError ? "parse" : undefined),
-          httpStatus: errorInfo?.httpStatus ?? fetched.responseStatus,
-          publicReason: fetched.publicReason ?? null,
+        const parsedNodes = prepareSourceParsedNodes(fetched.nodes, {
+          currentTag: source.tag,
+          currentNameTemplate: source.nameTemplate,
         });
+        const merged = mergeParsedSourceNodes(currentNodes, parsedNodes, deletedNodeNames, {
+          sourceId: source.id,
+          currentTag: source.tag,
+          currentNameTemplate: source.nameTemplate,
+          lastTag: source.lastParsedTag,
+          lastNameTemplate: source.lastParsedNameTemplate,
+          treatAsNewSource: Boolean(
+            source.lastParsedContent &&
+              source.lastParsedContent.trim() &&
+              source.lastParsedContent.trim() !== source.content.trim()
+          ),
+          smartNodeMatchingEnabled,
+          deletedNodes,
+        });
+
+        renameMap = composeNodeNameRenameMaps(renameMap, merged.renameMap);
+        currentNodes = merged.nodes;
+        usedUrlFetch = true;
+        refreshedSourceCount += 1;
+        refreshedUrlSourceCount += 1;
         continue;
       }
-      updateSourceSubscriptionInfo(source.id, resolvedUserInfo);
 
-      const parsedNodes = prepareSourceParsedNodes(fetched.nodes, {
-        currentTag: source.tag,
-        currentNameTemplate: source.nameTemplate,
-      });
-      const merged = mergeParsedSourceNodes(currentNodes, parsedNodes, deletedNodeNames, {
-        sourceId: source.id,
-        currentTag: source.tag,
-        currentNameTemplate: source.nameTemplate,
-        lastTag: source.lastParsedTag,
-        lastNameTemplate: source.lastParsedNameTemplate,
-        treatAsNewSource: Boolean(
-          source.lastParsedContent &&
-            source.lastParsedContent.trim() &&
-            source.lastParsedContent.trim() !== source.content.trim()
-        ),
-        smartNodeMatchingEnabled,
-        deletedNodes,
-      });
-
-      renameMap = composeNodeNameRenameMaps(renameMap, merged.renameMap);
-      currentNodes = merged.nodes;
-      usedUrlFetch = true;
-      refreshedSourceCount += 1;
-      refreshedUrlSourceCount += 1;
-      continue;
-    }
-
-    try {
-      const parsed = parseSubscription(source.content);
-      const resolvedUserInfo = resolveSubscriptionUserInfo(undefined, parsed.nodes);
-      if (hasSubscriptionUserInfo(resolvedUserInfo)) {
-        mergeSubscriptionUserInfo(subscriptionInfo, resolvedUserInfo);
+      let parsed: ReturnType<typeof parseSubscription>;
+      try {
+        parsed = parseSubscription(source.content);
+      } catch (error) {
+        recordFailedSource(source, error instanceof Error ? error.message : "解析失败", { errorCategory: "parse" });
+        continue;
       }
+      const resolvedUserInfo = resolveSubscriptionUserInfo(undefined, parsed.nodes);
+      result.warningCount += parsed.errors?.length ?? 0;
       if (parsed.nodes.length === 0) {
         recordFailedSource(source, "未解析到可用节点", { errorCategory: "parse" });
         continue;
@@ -323,10 +383,9 @@ export async function refreshNodeSnapshot(
       currentNodes = merged.nodes;
       refreshedSourceCount += 1;
       refreshedStaticSourceCount += 1;
-    } catch (error) {
-      recordFailedSource(source, error instanceof Error ? error.message : "解析失败", {
-        errorCategory: "parse",
-      });
+    } finally {
+      result.completedAt = new Date();
+      result.durationMs += result.completedAt.getTime() - result.startedAt.getTime();
     }
   }
 
@@ -334,22 +393,45 @@ export async function refreshNodeSnapshot(
     typeof options.fetchUrlUserInfo === "function" &&
     usedUrlFetch &&
     (
-      !hasSubscriptionUserInfo(subscriptionInfo) ||
-      savedSources.some((source) => source.type === "url" && shouldFetchSupplementalUserInfoForSource(source))
+      !refreshedSavedSources.some((source) => hasSubscriptionUserInfo(source.subscriptionUserInfo)) ||
+      savedSources.some((source) => selected(source) && source.type === "url" && shouldFetchSupplementalUserInfoForSource(source))
     )
   ) {
     for (const source of savedSources) {
-      if (source.type !== "url" || source.useProxyProviders) continue;
-      if (!shouldFetchSupplementalUserInfoForSource(source) && hasSubscriptionUserInfo(subscriptionInfo)) continue;
-      const headers = await options.fetchUrlUserInfo(source);
+      if (!selected(source) || source.type !== "url" || source.useProxyProviders) continue;
+      if (resultBySource.get(source.id)?.outcome === "failed") continue;
+      if (!shouldFetchSupplementalUserInfoForSource(source) && refreshedSavedSources.some((item) => hasSubscriptionUserInfo(item.subscriptionUserInfo))) continue;
+      const headers = await fetchSupplementalInfo(source);
       if (!headers) continue;
       mergeResponseMetadata(headers);
       const header = headers["subscription-userinfo"];
-      mergeSourceSubscriptionInfo(
+      updateSourceSubscriptionInfo(
         source.id,
         header ? resolveSubscriptionUserInfo(parseSubscriptionUserInfo(header)) : undefined
       );
     }
+  }
+
+  // Sum each saved snapshot once, including failed and unselected sources.
+  for (const source of refreshedSavedSources) {
+    if (hasSubscriptionUserInfo(source.subscriptionUserInfo)) {
+      mergeSubscriptionUserInfo(subscriptionInfo, source.subscriptionUserInfo!);
+    }
+  }
+  const sourceNodes = (nodes: ParsedNode[], sourceId: string) => nodes.filter((node) => getNodeSourceIds(node).includes(sourceId));
+  const serializeNodes = (nodes: ParsedNode[]) => JSON.stringify(nodes, (key, value) => {
+    if (key.startsWith("_")) return undefined;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(Object.keys(value).sort().map((name) => [name, value[name]]));
+    }
+    return value;
+  });
+  for (const result of sourceResults) {
+    const before = sourceNodes(options.storedNodes, result.sourceId);
+    const after = sourceNodes(currentNodes, result.sourceId);
+    result.nodeCountBefore = before.length;
+    result.nodeCountAfter = after.length;
+    result.nodesChanged = serializeNodes(before) !== serializeNodes(after);
   }
 
   if (!profileWebPageUrlState.conflicted && profileWebPageUrlState.value) {
@@ -360,6 +442,7 @@ export async function refreshNodeSnapshot(
   }
 
   return {
+    sourceResults,
     nodes: currentNodes,
     renameMap,
     subscriptionInfo,

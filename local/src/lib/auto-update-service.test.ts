@@ -12,8 +12,11 @@ const mocks = vi.hoisted(() => ({
   prepareRefreshCacheResult: vi.fn(),
   prisma: {
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     subscription: {
       findMany: vi.fn(),
+      findUnique: vi.fn(),
       updateMany: vi.fn(),
     },
     subscriptionAutoUpdateState: {
@@ -30,7 +33,8 @@ const mocks = vi.hoisted(() => ({
   resolveSubscriptionAutoUpdateState: vi.fn(),
 }));
 
-vi.mock("@subboost/server-core/subscription", () => ({
+vi.mock("@subboost/server-core/subscription", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@subboost/server-core/subscription")>(),
   applyCronUpdateOutcome: mocks.applyCronUpdateOutcome,
   createCronUpdateAccumulator: mocks.createCronUpdateAccumulator,
   extractHostsFromSubscriptionUrls: mocks.extractHostsFromSubscriptionUrls,
@@ -86,9 +90,13 @@ describe("local subscription auto update service", () => {
     });
     mocks.finalizeCronUpdateSummary.mockImplementation((acc, options) => ({ ...acc, options }));
     mocks.prisma.subscription.findMany.mockResolvedValue([subscription]);
+    mocks.prisma.subscription.findUnique.mockResolvedValue(subscription);
+    mocks.prisma.$queryRaw.mockResolvedValue([{ id: subscription.id, name: "subscription-refresh:sub-1", ownerToken: "test", expiresAt: new Date(Date.now() + 300000) }]);
+    mocks.prisma.$executeRaw.mockResolvedValue(1);
     mocks.prisma.subscription.updateMany.mockResolvedValue({ count: 1 });
     mocks.prisma.subscriptionAutoUpdateState.upsert.mockResolvedValue({ upsert: true });
     mocks.prisma.$transaction.mockImplementation(async (callback) => callback({
+      $queryRaw: mocks.prisma.$queryRaw,
       subscription: { updateMany: mocks.prisma.subscription.updateMany },
       subscriptionAutoUpdateState: { upsert: mocks.prisma.subscriptionAutoUpdateState.upsert },
     }));
@@ -110,6 +118,7 @@ describe("local subscription auto update service", () => {
     });
     mocks.resolveAutomaticRefreshCompletionDecision.mockReturnValue({
       kind: "success",
+      refreshResult: { ok: true, refreshedConfig: { rules: [], sources: [{ url: "https://airport.example/sub" }] }, cacheEntry: { nodes: [{ name: "A" }], subscriptionInfo: { upload: 1 } }, nodeCount: 1 },
       nextAutoUpdateState: {
         state: { lastAttemptedAt: now, externalFailureCount: 0 },
         shouldDisableAutoUpdate: false,
@@ -170,7 +179,7 @@ describe("local subscription auto update service", () => {
     );
   });
 
-  it("records all-source failures and disables auto update when requested", async () => {
+  it("records all-source failures without clearing the automatic update interval", async () => {
     mocks.prepareRefreshCacheResult.mockReturnValueOnce({ ok: false, reason: "no_nodes" });
     mocks.resolveAutomaticRefreshCompletionDecision.mockReturnValueOnce({
       kind: "all_sources_failed",
@@ -178,22 +187,17 @@ describe("local subscription auto update service", () => {
         state: { lastAttemptedAt: now, externalFailureCount: 3 },
         shouldDisableAutoUpdate: true,
       },
-      outcome: { kind: "disabled", subscriptionId: "sub-1" },
+      outcome: { kind: "failed", subscriptionId: "sub-1" },
     });
 
     await expect(runLocalSubscriptionAutoUpdateCron(now)).resolves.toEqual(
-      expect.objectContaining({ outcomes: [{ kind: "disabled", subscriptionId: "sub-1" }] })
+      expect.objectContaining({ outcomes: [{ kind: "failed", subscriptionId: "sub-1" }] })
     );
 
     expect(mocks.prisma.subscription.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ autoUpdateInterval: null }),
-      })
+      expect.objectContaining({ data: expect.not.objectContaining({ autoUpdateInterval: null }) })
     );
-    expect(console.warn).toHaveBeenCalledWith(
-      "[local-subscription-cron] auto update disabled",
-      expect.objectContaining({ subscriptionId: "sub-1" })
-    );
+    expect(console.warn).not.toHaveBeenCalled();
   });
 
   it("records attempted state for partial refresh failures", async () => {

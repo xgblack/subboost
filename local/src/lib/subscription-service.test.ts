@@ -39,6 +39,10 @@ const mocks = vi.hoisted(() => ({
     },
     subscriptionAutoUpdateState: { upsert: vi.fn() },
     $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
+    subscriptionSourceUpdateState: { deleteMany: vi.fn(), updateMany: vi.fn() },
+    subscriptionSourceUpdateLog: { deleteMany: vi.fn() },
   },
 }));
 
@@ -178,12 +182,14 @@ describe("local subscription service", () => {
     mocks.prepareRefreshCacheResult.mockReturnValue({
       ok: true,
       nodeCount: 1,
+      cacheEntry: { nodes: [node("Fresh")], subscriptionInfo: { upload: 1, total: 2048 } },
       refreshedConfig: { sources: [{ id: "source-1", type: "url", content: "https://example.com/sub" }] },
     });
     mocks.refreshNodeSnapshot.mockResolvedValue({
       nodes: [node("Fresh")],
       savedSources: [{ id: "source-1", type: "url", content: "https://example.com/sub" }],
       subscriptionInfo: { upload: 1, total: 2048 },
+      failedSources: [],
     });
     mocks.buildManualRefreshFailureResponse.mockReturnValue({ error: "refresh failed" });
     mocks.buildManualRefreshSuccessResponseBody.mockReturnValue({ ok: true, nodeCount: 1 });
@@ -199,7 +205,12 @@ describe("local subscription service", () => {
     mocks.prisma.subscription.updateMany.mockResolvedValue({ count: 1 });
     mocks.prisma.subscriptionAutoUpdateState.upsert.mockResolvedValue({});
     mocks.prisma.subscription.delete.mockResolvedValue(row());
+    mocks.prisma.$queryRaw.mockResolvedValue([{ id: "sub-1", name: "subscription-refresh:sub-1", ownerToken: "test", expiresAt: new Date(Date.now() + 300000) }]);
+    mocks.prisma.$executeRaw.mockResolvedValue(1);
     mocks.prisma.$transaction.mockImplementation(async (callback) => callback({
+      $queryRaw: mocks.prisma.$queryRaw,
+      subscriptionSourceUpdateState: mocks.prisma.subscriptionSourceUpdateState,
+      subscriptionSourceUpdateLog: mocks.prisma.subscriptionSourceUpdateLog,
       subscription: {
         update: mocks.prisma.subscription.update,
         updateMany: mocks.prisma.subscription.updateMany,
@@ -455,7 +466,7 @@ describe("local subscription service", () => {
     });
 
     expect(mocks.prisma.subscription.update).toHaveBeenCalledWith({
-      where: { id: "sub-1" },
+      where: { id: "sub-1", updatedAt: row().updatedAt },
       data: expect.objectContaining({
         name: "Updated",
         encryptedUrls: JSON.stringify(["https://new.example/sub"]),
@@ -474,7 +485,7 @@ describe("local subscription service", () => {
       autoUpdateInterval: "7200",
     });
     expect(mocks.prisma.subscription.update).toHaveBeenLastCalledWith({
-      where: { id: "sub-1" },
+      where: { id: "sub-1", updatedAt: row().updatedAt },
       data: expect.objectContaining({
         name: "Saved",
         encryptedNodes: expect.stringContaining('"name":"Node only update"'),
@@ -493,7 +504,7 @@ describe("local subscription service", () => {
         externalFailureCount: 0,
         failureSourceState: null,
         lastFailedAt: null,
-        lastAttemptedAt: null,
+        lastAttemptedAt: row().autoUpdateState!.lastAttemptedAt,
         nodeQuotaFailureCount: 0,
         lastNodeQuotaExceededAt: null,
         lastNodeQuotaActual: null,
@@ -652,10 +663,10 @@ describe("local subscription service", () => {
       expect.objectContaining({ sources: expect.any(Array) }),
       expect.objectContaining({ nodes: [expect.objectContaining({ name: "Node" })], proxyProviders: null })
     );
-    expect(mocks.prisma.subscription.update).toHaveBeenCalledWith({
-      where: { id: "sub-1" },
-      data: { lastAccessedAt: expect.any(Date) },
-    });
+    expect(mocks.prisma.$executeRaw).toHaveBeenCalledWith(
+      expect.any(Array), expect.any(Date), "sub-1",
+    );
+    expect(mocks.prisma.subscription.update).not.toHaveBeenCalled();
 
     mocks.prisma.subscription.findUnique.mockResolvedValueOnce(null);
     await expect(generateSubscriptionYaml("missing")).resolves.toBeNull();

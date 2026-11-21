@@ -598,3 +598,50 @@ describe("refreshNodeSnapshot", () => {
     ]);
   });
 });
+
+describe("targeted source refresh", () => {
+  const sources = ["a", "b"].map((id) => ({ id, type: "url" as const, content: `https://${id}.example/sub`, subscriptionUserInfo: { total: 10000 } }));
+  const nodes = ["a", "b"].map((id) => ({ type: "trojan" as const, name: id, server: `${id}.example`, port: 443, password: "old", _sourceIds: [id], _originName: id }));
+
+  it("executes only its target, retaining peer ownership and traffic snapshots", async () => {
+    const fetchUrlNodes = vi.fn(async () => ({ ok: true, nodes: [{ ...nodes[0], password: "updated" }], headers: { "subscription-userinfo": "total=20000" } }));
+    const fetchUrlUserInfo = vi.fn(async () => undefined);
+    const result = await refreshNodeSnapshot({ config: { sources }, urls: [], storedNodes: nodes, targetSourceId: "a", fetchUrlNodes, fetchUrlUserInfo });
+    expect(fetchUrlNodes).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: "a" }));
+    expect(fetchUrlUserInfo).not.toHaveBeenCalled();
+    expect(result.nodes.find((node) => node.name === "b")).toMatchObject(nodes[1]);
+    expect(result.savedSources).toHaveLength(2);
+    expect(result.subscriptionInfo.total).toBe(30000);
+    expect(result.sourceResults).toEqual([expect.objectContaining({ sourceId: "a", outcome: "refreshed", nodesChanged: true })]);
+  });
+
+  it("keeps failed source data and continues to a healthy source when transport throws", async () => {
+    const fetchUrlNodes = vi.fn(async (source: { id: string }) => {
+      if (source.id === "a") throw Object.assign(new Error("network failure with credentials"), { code: "ECONNRESET" });
+      return { ok: true, nodes: [{ ...nodes[1], password: "updated" }] };
+    });
+    const result = await refreshNodeSnapshot({ config: { sources }, urls: [], storedNodes: nodes, fetchUrlNodes });
+    expect(result.nodes.find((node) => node.name === "a")).toMatchObject(nodes[0]);
+    expect(result.nodes.find((node) => node.name === "b")).toMatchObject({ password: "updated" });
+    expect(result.sourceResults?.map((item) => item.outcome)).toEqual(["failed", "refreshed"]);
+    expect(result.subscriptionInfo.total).toBe(20000);
+  });
+
+  it("a supplemental metadata failure warns without discarding successfully refreshed nodes", async () => {
+    const result = await refreshNodeSnapshot({
+      config: { sources: [{ ...sources[0], userinfoUrl: "https://a.example/info" }, sources[1]] },
+      urls: [], storedNodes: nodes, targetSourceId: "a",
+      fetchUrlNodes: vi.fn(async () => ({ ok: true, nodes: [{ ...nodes[0], password: "new" }] })),
+      fetchUrlUserInfo: vi.fn(async () => { throw Object.assign(new Error("metadata down"), { code: "ETIMEDOUT" }); }),
+    });
+    expect(result.nodes.find((node) => node.name === "a")).toMatchObject({ password: "new" });
+    expect(result.sourceResults?.[0]).toMatchObject({ outcome: "refreshed", warningCount: 1 });
+    expect(result.subscriptionInfo.total).toBe(20000);
+  });
+  it("does not disguise an unexpected database or programming failure as a source network error", async () => {
+    await expect(refreshNodeSnapshot({ config: { sources }, urls: [], storedNodes: nodes,
+      fetchUrlNodes: async () => { throw new Error("database unavailable"); },
+    })).rejects.toThrow("database unavailable");
+  });
+
+});
