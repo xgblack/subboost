@@ -24,6 +24,7 @@ import { useConfigStore } from "@subboost/ui/store/config-store";
 import { initialState } from "@subboost/ui/store/config-store/definitions";
 import { captureAuthConfigHandoff } from "@subboost/ui/store/config-store/auth-handoff";
 import { toast } from "@subboost/ui/components/ui/toaster";
+import { markDraftSaved } from "./unsaved-prompt";
 import {
   ensureNodeOriginName,
   ensureNodesHaveValidSourceIds,
@@ -33,6 +34,7 @@ import {
 
 export function useEditingSubscriptionLoader({
   editSubscriptionId,
+  hasEditingSubscription = false,
   userId,
   authChecked = true,
   loadSubscription,
@@ -45,6 +47,24 @@ export function useEditingSubscriptionLoader({
 }: EditingSubscriptionLoaderOptions): boolean {
   const [isLoadingEditingSubscription, setIsLoadingEditingSubscription] = React.useState(false);
   const previousEditId = React.useRef<string | null>(null);
+
+  // 编辑状态以网址为准：网址没有 editSubscriptionId 时，丢弃其它页面留下的编辑记录，
+  // 让保存走新建，同时保留当前配置（例如刚从模板库应用的模板）。
+  // 同一页面内退出编辑由下方加载逻辑处理，那里会一并重置配置。
+  React.useEffect(() => {
+    if (editSubscriptionId || !hasEditingSubscription || previousEditId.current) return;
+    setEditingSubscription(null);
+    setSubscriptionName("");
+    setSubscriptionUrl("");
+    setCopied(false);
+  }, [
+    editSubscriptionId,
+    hasEditingSubscription,
+    setCopied,
+    setEditingSubscription,
+    setSubscriptionName,
+    setSubscriptionUrl,
+  ]);
 
   // 从“我的订阅”跳转回来时，加载订阅详情到首页编辑器
   React.useEffect(() => {
@@ -575,6 +595,7 @@ export function useEditingSubscriptionLoader({
             autoUpdateInterval,
             smartNodeMatchingEnabled: (cfg as any).smartNodeMatchingEnabled !== false,
           });
+          markDraftSaved();
           setSubscriptionName(sub.name || "");
           setSubscriptionUrl("");
           setCopied(false);

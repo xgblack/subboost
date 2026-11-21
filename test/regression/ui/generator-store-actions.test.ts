@@ -316,13 +316,13 @@ describe("public generator and refresh branch coverage", () => {
     ]);
     expect(getState().builtinRuleEdits["module:ai:openai"]).toBeUndefined();
     expect(getState().customRuleSets).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: "new-extra", behavior: "ipcidr", noResolve: true })])
+      expect.arrayContaining([expect.objectContaining({ id: "new-extra", behavior: "ipcidr", noResolve: false })])
     );
 
     actions.updateModuleRule("ai", "missing", { name: "Ignored" });
     actions.updateModuleRule("ai", "custom-a", { path: "geoip/custom-a.mrs", noResolve: false });
     expect(getState().customRuleSets).toEqual(
-      expect.arrayContaining([expect.objectContaining({ id: "custom-a", behavior: "ipcidr", noResolve: true })])
+      expect.arrayContaining([expect.objectContaining({ id: "custom-a", behavior: "ipcidr", noResolve: false })])
     );
 
     actions.removeModuleRule("ai", "custom-a");
@@ -400,8 +400,9 @@ describe("public generator and refresh branch coverage", () => {
     expect(getState().proxyGroupNameOverrides).toEqual({});
   });
 
-  it("covers node action restore, rename, order, and listener-port branches", () => {
+  it("restores, renames, and reorders legacy nodes while preserving listener ports", () => {
     const { actions, getState } = createNodeHarness({
+      nodeSortMode: "legacy",
       nodes: [
         ssNode("Alpha", { _originName: "Origin Alpha", _sourceIds: ["source-a"] }),
         ssNode("Beta"),

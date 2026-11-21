@@ -15,7 +15,9 @@ import { sourceTypeInfo } from "./constants";
 export function SourcesSection() {
   const {
     addSource,
+    applyExpandedSourceContent,
     closeExpandedSourceEditor,
+    expandedSourceTailscaleStateDirs,
     error,
     expandedSource,
     expandedSourcePreviewName,
@@ -172,6 +174,8 @@ export function SourcesSection() {
         onClose={closeExpandedSourceEditor}
         onUpdateContent={updateSource}
         onUpdateMeta={updateSourceMeta}
+        onApplyContent={applyExpandedSourceContent}
+        tailscaleStateDirs={expandedSourceTailscaleStateDirs}
       />
     </>
   );

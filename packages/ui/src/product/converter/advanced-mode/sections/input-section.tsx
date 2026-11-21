@@ -23,7 +23,9 @@ export function InputSection({
 }) {
   const {
     addSource,
+    applyExpandedSourceContent,
     closeExpandedSourceEditor,
+    expandedSourceTailscaleStateDirs,
     error: globalError,
     expandedSource,
     expandedSourcePreviewName,
@@ -183,6 +185,8 @@ export function InputSection({
         onClose={closeExpandedSourceEditor}
         onUpdateContent={updateSource}
         onUpdateMeta={updateSourceMeta}
+        onApplyContent={applyExpandedSourceContent}
+        tailscaleStateDirs={expandedSourceTailscaleStateDirs}
       />
     </div>
   );

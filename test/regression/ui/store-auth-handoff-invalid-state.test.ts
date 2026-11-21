@@ -71,6 +71,7 @@ describe("auth handoff invalid state normalization", () => {
 
     expect(consumeAuthConfigHandoff()).toEqual({
       nodes: [{ name: "Node" }],
+      nodeSortMode: "legacy",
       nodeNameFilter: { enabled: false, excludeRegexes: [] },
       sharedHealthChecks: false,
     });
@@ -86,6 +87,7 @@ describe("auth handoff invalid state normalization", () => {
     });
 
     expect(consumeAuthConfigHandoff()).toEqual({
+      nodeSortMode: "legacy",
       nodeNameFilter: { enabled: false, excludeRegexes: [] },
       sharedHealthChecks: false,
     });
