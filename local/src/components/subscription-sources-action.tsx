@@ -41,6 +41,11 @@ const resultLabels: Record<SourceUpdateResult, string> = {
   not_applied: "未应用",
 };
 const triggerLabels = { automatic: "自动", manual_all: "手动全量", manual_source: "手动单源" };
+const sourceTypeLabels: Record<SubscriptionSourceSummary["type"], string> = {
+  url: "订阅链接",
+  yaml: "静态 YAML",
+  nodes: "节点文本",
+};
 
 function sourcePath(subscriptionId: string, sourceId: string) {
   return `/api/subscriptions/${encodeURIComponent(subscriptionId)}/sources/${encodeURIComponent(sourceId)}`;
@@ -235,8 +240,8 @@ function SourceRow({
             <p className="break-words text-sm font-medium text-fg" title={source.label}>
               {source.label}
             </p>
-            <p className="mt-1 break-all text-xs text-fg-50">
-              {source.address} · {source.nodeCount} 个节点
+            <p className="mt-1 text-xs text-fg-50">
+              {sourceTypeLabels[source.type]} · {source.nodeCount} 个节点
             </p>
           </div>
         </div>
