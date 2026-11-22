@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { importSubscriptionFromUrl, type SourceImportTransportRequest } from "./source-import";
+import { buildSourceImportParseResult, importSubscriptionFromUrl, type SourceImportTransportRequest } from "./source-import";
 
 const ss = "{name: ss, type: ss, server: local.subboost.test, port: 443, cipher: aes-128-gcm, password: secret}";
 const anytls = "{name: tls, type: anytls, server: local.subboost.test, port: 8443, password: pass, alpn: [h2], client-fingerprint: chrome}";
@@ -63,7 +63,7 @@ describe("bounded complete snapshot import", () => {
     try {
       const fetchText = vi.fn();
       const result = await importSubscriptionFromUrl({ url: "https://local.subboost.test/sub" }, { fetchText });
-      expect(result).toMatchObject({ ok: false, error: "获取 url 失败" });
+      expect(result).toMatchObject({ ok: false, error: "订阅源请求超时" });
       expect(fetchText).not.toHaveBeenCalled();
     } finally { now.mockRestore(); }
   });
@@ -74,5 +74,50 @@ describe("bounded complete snapshot import", () => {
     expect(await importSubscriptionFromUrl({ url: "https://local.subboost.test/sub" }, { fetchText }))
       .toMatchObject({ ok: false, errorInfo: { category: "parse" } });
     expect(fetchText).toHaveBeenCalledTimes(4);
+  });
+
+  it("interrupts the active profile at the total deadline and retains the earlier usable snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      const signals: AbortSignal[] = [];
+      const fetchText = vi.fn(async ({ signal }: SourceImportTransportRequest) => {
+        signals.push(signal!);
+        if (signals.length === 1) return { ok: true, content: `proxies: [${ss}]` };
+        return new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+      });
+      const pending = importSubscriptionFromUrl({ url: "https://local.subboost.test/sub", userinfoUrl: "https://local.subboost.test/info" }, { fetchText });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expect(pending).resolves.toMatchObject({
+        ok: true, parsedNodes: [expect.objectContaining({ type: "ss" })],
+        parseErrors: [], warnings: ["附加订阅信息请求超时，已保留节点"],
+      });
+      expect(fetchText).toHaveBeenCalledTimes(2);
+      expect(signals[1].aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not swallow parent cancellation or start another profile", async () => {
+    const controller = new AbortController();
+    const reason = new Error("lease lost fixture");
+    const fetchText = vi.fn(async ({ signal }: SourceImportTransportRequest) => new Promise<never>((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+    }));
+    const pending = importSubscriptionFromUrl({ url: "https://local.subboost.test/sub" }, { fetchText, signal: controller.signal });
+    const rejected = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+    await rejected;
+    expect(fetchText).toHaveBeenCalledOnce();
+    await expect(importSubscriptionFromUrl({ url: "https://local.subboost.test/sub" }, { fetchText, signal: controller.signal })).rejects.toBe(reason);
+    expect(fetchText).toHaveBeenCalledOnce();
+  });
+
+  it("treats a supplemental failure as a warning, not lost content", async () => {
+    const fetchText = vi.fn(async ({ purpose }: SourceImportTransportRequest) => purpose === "content"
+      ? { ok: true, content: `proxies: [${ss}]` }
+      : { ok: false, error: "timeout" });
+    const result = await importSubscriptionFromUrl({ url: "https://local.subboost.test/sub", userinfoUrl: "https://local.subboost.test/info" }, { fetchText });
+    expect(result).toMatchObject({ ok: true, parsedNodes: [expect.objectContaining({ type: "ss" })], parseErrors: [], warnings: ["附加订阅信息获取失败，已保留节点"] });
+    if (result.ok) expect(buildSourceImportParseResult(result)).toMatchObject({ totalParsed: 1, totalFailed: 0 });
   });
 });

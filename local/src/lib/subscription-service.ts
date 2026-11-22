@@ -337,22 +337,33 @@ export async function resetSubscriptionLink(ownerId: string, id: string, expecte
   return { status: "updated" as const, subscription: { id, token, subscriptionUrl: buildLocalSubscriptionUrl(token) } };
 }
 
-export function buildSubscriptionFetchCallbacks() {
+export function buildSubscriptionFetchCallbacks(signal?: AbortSignal) {
   return {
     fetchUrlNodes: async (source: SavedSource) => {
+      signal?.throwIfAborted();
+      const startedAt = Date.now();
       const imported = await importSourceUrlDirect({
         url: source.content,
         ...(source.userinfoUrl ? { userinfoUrl: source.userinfoUrl } : {}),
         ...(source.userinfoUserAgent ? { userinfoUserAgent: source.userinfoUserAgent } : {}),
-      });
+      }, { signal });
+      signal?.throwIfAborted();
       if (imported.ok) {
+        if (imported.warnings?.length) console.warn("[subscription-refresh] source metadata warning", {
+          sourceId: source.id, warningCount: imported.warnings.length,
+        });
         return {
           ok: true,
           nodes: imported.parsedNodes,
           errors: imported.parseErrors,
+          ...(imported.warnings?.length ? { warnings: imported.warnings } : {}),
           headers: imported.headers,
         };
       }
+      console.warn("[subscription-refresh] source failed", {
+        sourceId: source.id, durationMs: Date.now() - startedAt,
+        category: imported.errorInfo?.category, httpStatus: imported.responseStatus,
+      });
       return {
         ok: false,
         nodes: [],
@@ -363,7 +374,7 @@ export function buildSubscriptionFetchCallbacks() {
       };
     },
     fetchUrlUserInfo: async (source: SavedSource) => {
-      return fetchSourceUserInfoHeadersDirect(source);
+      return fetchSourceUserInfoHeadersDirect(source, { signal });
     },
   };
 }
@@ -395,7 +406,8 @@ export async function refreshSubscription(ownerId: string, id: string, options: 
     const attemptedAt = new Date();
     const snapshot = await refreshNodeSnapshot({
       config: secrets.config, urls: secrets.urls, storedNodes: secrets.nodes, targetSourceId,
-      ...buildSubscriptionFetchCallbacks(),
+      signal: lease.signal,
+      ...buildSubscriptionFetchCallbacks(lease.signal),
     });
     if (targetSourceId) {
       // These response fields have no per-source provenance in existing subscriptions.

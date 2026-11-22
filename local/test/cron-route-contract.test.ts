@@ -10,6 +10,7 @@ const leaseMocks = vi.hoisted(() => ({
   assertOwned: vi.fn(),
   release: vi.fn(),
   stop: vi.fn(),
+  signal: new AbortController().signal,
   JobLeaseLostError: class JobLeaseLostError extends Error {},
 }));
 
@@ -27,6 +28,7 @@ vi.mock("@local/lib/job-lease", () => ({
   startLocalJobLeaseHeartbeat: vi.fn(() => ({
     assertOwned: leaseMocks.assertOwned,
     stop: leaseMocks.stop,
+    signal: leaseMocks.signal,
   })),
   JobLeaseLostError: leaseMocks.JobLeaseLostError,
 }));
@@ -132,6 +134,11 @@ describe("local cron routes", () => {
     expect(response.status).toBe(200);
     expect(runLocalSubscriptionAutoUpdateCron).toHaveBeenCalledTimes(1);
     expect((await readJson(response)).success).toBe(true);
+    expect(runLocalSubscriptionAutoUpdateCron).toHaveBeenCalledWith(expect.any(Date), {
+      assertLease: leaseMocks.assertOwned,
+      signal: leaseMocks.signal,
+      lease: expect.objectContaining({ name: "local-subscription-auto-update", ownerToken: "owner" }),
+    });
   });
 
   it("skips an overlapping run and fails closed after lease loss", async () => {

@@ -33,6 +33,7 @@ type UrlNodeFetchResult = {
   ok: boolean;
   nodes: ParsedNode[];
   errors?: string[];
+  warnings?: string[];
   headers?: Record<string, string>;
   error?: string;
   errorInfo?: {
@@ -61,6 +62,7 @@ export type RefreshNodeSnapshotOptions = {
   storedNodes: ParsedNode[];
   /** Restrict execution, while retaining the full source list for ownership and metadata. */
   targetSourceId?: string;
+  signal?: AbortSignal;
   fetchUrlNodes: (source: SavedSource) => Promise<UrlNodeFetchResult>;
   fetchUrlUserInfo?: (source: SavedSource) => Promise<Record<string, string> | undefined>;
 };
@@ -136,6 +138,7 @@ function mergeStableMetadataValue(state: StableMetadataState, nextValue: string 
 export async function refreshNodeSnapshot(
   options: RefreshNodeSnapshotOptions
 ): Promise<RefreshNodeSnapshotResult> {
+  options.signal?.throwIfAborted();
   const savedSources = normalizeSavedSourcesForPersistence(options.config.sources, {
     fallbackUrls: options.urls,
   });
@@ -230,13 +233,16 @@ export async function refreshNodeSnapshot(
   };
 
   const fetchSupplementalInfo = async (source: SavedSource) => {
+    options.signal?.throwIfAborted();
     const startedAt = Date.now();
     const result = resultBySource.get(source.id);
     try {
       const headers = await options.fetchUrlUserInfo?.(source);
+      options.signal?.throwIfAborted();
       if (result && shouldFetchSupplementalUserInfoForSource(source) && !headers?.["subscription-userinfo"]) result.warningCount += 1;
       return headers;
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (!expectedFetchError(error)) throw error;
       if (result) result.warningCount += 1;
       return undefined;
@@ -249,6 +255,7 @@ export async function refreshNodeSnapshot(
   };
 
   for (const source of savedSources) {
+    options.signal?.throwIfAborted();
     if (!selected(source)) continue;
     if (source.type === "url" && source.useProxyProviders) {
       const detached = detachSourceNodesFromState(currentNodes, source.id);
@@ -287,13 +294,15 @@ export async function refreshNodeSnapshot(
         let fetched: UrlNodeFetchResult;
         try {
           fetched = await options.fetchUrlNodes(source);
+          options.signal?.throwIfAborted();
         } catch (error) {
+          options.signal?.throwIfAborted();
           const message = expectedFetchError(error);
           if (!message) throw error;
           recordFailedSource(source, message, { errorCategory: "network" });
           continue;
         }
-        result.warningCount += fetched.errors?.length ?? 0;
+        result.warningCount += (fetched.errors?.length ?? 0) + (fetched.warnings?.length ?? 0);
         mergeResponseMetadata(fetched.headers);
         const userInfoHeader = fetched.headers?.["subscription-userinfo"];
         const rawUserInfo = userInfoHeader ? parseSubscriptionUserInfo(userInfoHeader) : undefined;
@@ -418,6 +427,7 @@ export async function refreshNodeSnapshot(
       mergeSubscriptionUserInfo(subscriptionInfo, source.subscriptionUserInfo!);
     }
   }
+  options.signal?.throwIfAborted();
   const sourceNodes = (nodes: ParsedNode[], sourceId: string) => nodes.filter((node) => getNodeSourceIds(node).includes(sourceId));
   const serializeNodes = (nodes: ParsedNode[]) => JSON.stringify(nodes, (key, value) => {
     if (key.startsWith("_")) return undefined;

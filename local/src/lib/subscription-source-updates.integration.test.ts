@@ -478,9 +478,11 @@ describe.runIf(Boolean(databaseUrl))("subscription source updates with PostgreSQ
       await prisma.subscriptionSourceUpdateLog.findFirst({ where: { subscriptionId: row.id } }),
     ).toMatchObject({ result: "not_applied", nodeCountBefore: 1, nodeCountAfter: 1, nodesChanged: false });
   });
-  it("partial parsing is applied with an explicit warning rather than claiming a complete clean import", async () => {
+  it.each(["parse", "metadata"])("a %s warning is persisted without discarding successful source nodes", async (kind) => {
     const row = await fixture();
-    transport.fetch.mockResolvedValueOnce({ ...success("a"), parseErrors: ["fixture parse warning"] });
+    transport.fetch.mockResolvedValueOnce({ ...success("a"),
+      ...(kind === "parse" ? { parseErrors: ["fixture parse warning"] } : { warnings: ["fixture metadata warning"] }),
+    });
     const response = await service.refreshSubscription(ownerId, row.id, { targetSourceId: "a" });
     expect(response).toMatchObject({
       ok: true,
@@ -489,6 +491,24 @@ describe.runIf(Boolean(databaseUrl))("subscription source updates with PostgreSQ
     expect(
       (await sourceService.listSubscriptionSources(ownerId, row.id))?.find((source) => source.id === "a"),
     ).toMatchObject({ lastResult: "applied", warningCount: 1 });
+  });
+
+  it("retains a timed-out source while publishing its healthy peer and automatic history", async () => {
+    const row = await fixture();
+    transport.fetch.mockImplementation(async ({ url }: { url: string }) => url.includes("b.example")
+      ? { ok: false, error: "订阅源请求超时", errorInfo: { category: "network", message: "订阅源请求超时" } }
+      : success("a"));
+    expect((await cron.runLocalSubscriptionAutoUpdateCron(new Date())).results.updated).toBe(1);
+    const current = await prisma.subscription.findUniqueOrThrow({ where: { id: row.id } });
+    expect(current.autoUpdateInterval).toBe(360);
+    const saved = service.readSubscriptionSecrets(current);
+    expect(saved.nodes.find((item) => item.name === "a")).toMatchObject({ password: "fixture-new" });
+    expect(saved.nodes.find((item) => item.name === "b")).toMatchObject({ password: "fixture-old" });
+    const logs = await prisma.subscriptionSourceUpdateLog.findMany({ where: { subscriptionId: row.id }, orderBy: { sourceId: "asc" } });
+    expect(logs).toMatchObject([
+      { sourceId: "a", trigger: "automatic", result: "applied" },
+      { sourceId: "b", trigger: "automatic", result: "failed", errorCategory: "network" },
+    ]);
   });
 
   it("an expired refresh lease cannot commit a snapshot or success history", async () => {
@@ -532,5 +552,47 @@ describe.runIf(Boolean(databaseUrl))("subscription source updates with PostgreSQ
       row.encryptedNodes,
     );
     expect(await prisma.subscriptionSourceUpdateLog.count({ where: { subscriptionId: row.id } })).toBe(0);
+  });
+
+  it("publishes a healthy aggregate and its automatic history before a slower peer finishes", async () => {
+    const slow = await fixture();
+    const healthy = await fixture();
+    let release!: (value: ReturnType<typeof success>) => void;
+    let held = false;
+    transport.fetch.mockImplementationOnce(() => {
+      held = true;
+      return new Promise((resolve) => { release = resolve; });
+    });
+    const pending = cron.runLocalSubscriptionAutoUpdateCron(new Date());
+    try {
+      await vi.waitFor(() => expect(held).toBe(true));
+      // Whichever row starts first is held; the other aggregate must commit independently.
+      await vi.waitFor(async () => {
+        const count = await prisma.subscriptionSourceUpdateLog.count({ where: { subscriptionId: { in: [slow.id, healthy.id] }, trigger: "automatic" } });
+        expect(count).toBe(2);
+      });
+      expect(await prisma.subscriptionSourceUpdateState.count({ where: { subscriptionId: { in: [slow.id, healthy.id] } } })).toBe(2);
+    } finally { release(success("a")); }
+    expect((await pending).results).toMatchObject({ updated: 2, failed: 0 });
+    expect(await prisma.subscriptionSourceUpdateLog.count({ where: { subscriptionId: { in: [slow.id, healthy.id] } } })).toBe(4);
+  });
+
+  it("a replaced cron owner cannot commit automatic snapshots or history", async () => {
+    const row = await fixture();
+    const jobs = await import("./job-lease");
+    const lease = await jobs.acquireLocalJobLease({ name: `cron-fence-${row.id}`, leaseMs: 300000 });
+    if (!lease) throw new Error("Expected test lease");
+    transport.fetch.mockImplementationOnce(async () => {
+      await prisma.jobLeaseLock.update({ where: { name: lease.name }, data: { ownerToken: "replacement-fixture" } });
+      return success("a");
+    });
+    try {
+      await expect(cron.runLocalSubscriptionAutoUpdateCron(new Date(), { lease })).rejects.toMatchObject({ leaseName: lease.name });
+      expect((await prisma.subscription.findUniqueOrThrow({ where: { id: row.id } })).encryptedNodes).toBe(row.encryptedNodes);
+      expect(await prisma.subscriptionSourceUpdateLog.count({ where: { subscriptionId: row.id } })).toBe(0);
+      expect(await prisma.subscriptionSourceUpdateState.count({ where: { subscriptionId: row.id } })).toBe(0);
+    } finally {
+      await prisma.jobLeaseLock.delete({ where: { name: lease.name } });
+    }
   });
 });

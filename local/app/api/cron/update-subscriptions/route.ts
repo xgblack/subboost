@@ -27,6 +27,8 @@ export async function POST(request: NextRequest) {
     heartbeat = startLocalJobLeaseHeartbeat({ lease, leaseMs: LEASE_MS, intervalMs: HEARTBEAT_MS });
     const summary = await runLocalSubscriptionAutoUpdateCron(new Date(), {
       assertLease: heartbeat.assertOwned,
+      signal: heartbeat.signal,
+      lease,
     });
     return json({
       success: true,

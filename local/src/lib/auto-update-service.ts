@@ -26,12 +26,13 @@ import {
   type SubscriptionRow,
 } from "./subscription-service";
 import { LOCAL_AUTO_UPDATE_MIN_SECONDS } from "./auto-update-policy";
-import { JobLeaseLostError } from "./job-lease";
+import { JobLeaseLostError, type LocalJobLease } from "./job-lease";
 import { localAutomaticRefreshStateHelpers } from "./auto-update-source-policy";
 import { withSubscriptionRefreshLease, type SubscriptionRefreshLease } from "./subscription-refresh-lock";
 import { persistSubscriptionRefresh } from "./subscription-source-update-store";
 
 type AutoUpdateSubscriptionRow = SubscriptionRow & { owner: { username: string | null } };
+const MAX_CONCURRENT_SUBSCRIPTIONS = 2;
 const staleOutcome = (requestedHosts: string[]): CronUpdateOutcome => ({
   status: "skipped",
   requestedHosts,
@@ -74,7 +75,8 @@ async function refreshAutomaticSubscription(
       config: secrets.config,
       urls: secrets.urls,
       storedNodes: secrets.nodes,
-      ...buildSubscriptionFetchCallbacks(),
+      signal: lease.signal,
+      ...buildSubscriptionFetchCallbacks(lease.signal),
     });
     const { failureState, failureReason } = resolveAutomaticRefreshFailureAnalysis({
       currentState,
@@ -152,6 +154,7 @@ async function refreshAutomaticSubscription(
     }
     return decision.outcome;
   } catch (error) {
+    lease.signal?.throwIfAborted();
     if (error instanceof JobLeaseLostError) throw error;
     const completion = resolveAutomaticRefreshUnexpectedFailureCompletion({
       target,
@@ -177,6 +180,7 @@ async function refreshAutomaticSubscription(
         });
         if (!written) return staleOutcome(requestedHosts);
       } catch (writeError) {
+        lease.signal?.throwIfAborted();
         if (writeError instanceof JobLeaseLostError) throw writeError;
         console.error("[local-subscription-cron] unable to persist failed attempt", {
           subscriptionId: subscription.id,
@@ -193,36 +197,76 @@ async function refreshAutomaticSubscription(
 
 export async function runLocalSubscriptionAutoUpdateCron(
   now = new Date(),
-  options: { assertLease?: () => Promise<void> } = {},
+  options: { assertLease?: () => Promise<void>; signal?: AbortSignal; lease?: LocalJobLease } = {},
 ): Promise<FinalCronUpdateSummary> {
-  await options.assertLease?.();
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const assertCronLease = async () => {
+    signal.throwIfAborted();
+    try { await options.assertLease?.(); }
+    catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+    signal.throwIfAborted();
+  };
+  await assertCronLease();
   const subscriptions = await prisma.subscription.findMany({
     where: { autoUpdateInterval: { not: null } },
     include: { owner: { select: { username: true } }, autoUpdateState: true },
   });
   const accumulator = createCronUpdateAccumulator(subscriptions.length);
-  for (const subscription of subscriptions) {
-    await options.assertLease?.();
-    if (!resolveLocalAutoUpdateSchedule(subscription, now).due) {
-      recordCronUpdateSkipped(accumulator);
-      continue;
+  let nextIndex = 0;
+  const worker = async () => {
+    while (!signal.aborted) {
+      const subscription = subscriptions[nextIndex++];
+      if (!subscription) return;
+      await assertCronLease();
+      if (!resolveLocalAutoUpdateSchedule(subscription, now).due) {
+        recordCronUpdateSkipped(accumulator);
+        continue;
+      }
+      const startedAt = Date.now();
+      let outcome: CronUpdateOutcome | undefined;
+      console.info("[local-subscription-cron] started", { subscriptionId: subscription.id });
+      try {
+        const result = await withSubscriptionRefreshLease(subscription.id, async (lease) => {
+          const current = await prisma.subscription.findUnique({
+            where: { id: subscription.id },
+            include: { owner: { select: { username: true } }, autoUpdateState: true },
+          });
+          lease.signal?.throwIfAborted();
+          if (!current || current.autoUpdateInterval === null || !resolveLocalAutoUpdateSchedule(current, now).due)
+            return staleOutcome([]);
+          return refreshAutomaticSubscription(current, lease, assertCronLease);
+        }, { signal, cronLease: options.lease });
+        outcome = result.busy ? staleOutcome([]) : result.value;
+      } catch (error) {
+        // A global failure cancels every worker. A subscription-local failure does not.
+        signal.throwIfAborted();
+        if (error instanceof JobLeaseLostError && options.lease && error.leaseName === options.lease.name) {
+          controller.abort(error);
+          throw error;
+        }
+        console.error("[local-subscription-cron] subscription task failed", {
+          subscriptionId: subscription.id, leaseLost: error instanceof JobLeaseLostError,
+        });
+        outcome = {
+          status: "failed", requestedHosts: [], recordHosts: false,
+          resultsError: `Subscription ${subscription.id}: 更新失败，已保留原快照`,
+        };
+      } finally {
+        console.info("[local-subscription-cron] finished", {
+          subscriptionId: subscription.id, durationMs: Date.now() - startedAt,
+          status: outcome?.status ?? "cancelled",
+        });
+      }
+      applyCronUpdateOutcome(accumulator, outcome);
     }
-    const result = await withSubscriptionRefreshLease(subscription.id, async (lease) => {
-      const current = await prisma.subscription.findUnique({
-        where: { id: subscription.id },
-        include: { owner: { select: { username: true } }, autoUpdateState: true },
-      });
-      if (
-        !current ||
-        current.autoUpdateInterval === null ||
-        !resolveLocalAutoUpdateSchedule(current, now).due
-      )
-        return staleOutcome([]);
-      return refreshAutomaticSubscription(current, lease, options.assertLease);
-    });
-    if (result.busy) recordCronUpdateSkipped(accumulator);
-    else applyCronUpdateOutcome(accumulator, result.value);
-  }
-  await options.assertLease?.();
+  };
+  // Await cleanup of every active worker even if global ownership was lost.
+  await Promise.allSettled(Array.from({ length: Math.min(MAX_CONCURRENT_SUBSCRIPTIONS, subscriptions.length) },
+    () => worker().catch((error) => { controller.abort(error); throw error; })));
+  await assertCronLease();
   return finalizeCronUpdateSummary(accumulator, { maxTopHosts: 50, maxTopUsers: 50 });
 }

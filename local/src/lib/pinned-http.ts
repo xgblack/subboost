@@ -1,6 +1,8 @@
 import { isIP } from "node:net";
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 
 export class ResponseTooLargeError extends Error {
@@ -25,30 +27,30 @@ function normalizeHeaders(headers: IncomingHttpHeaders): Record<string, string> 
   return out;
 }
 
-async function readLimitedBody(response: IncomingMessage, maxBytes: number): Promise<string> {
+async function readLimitedBody(response: IncomingMessage, maxBytes: number, signal: AbortSignal): Promise<string> {
   const encoding = String(response.headers["content-encoding"] || "").trim().toLowerCase();
-  const decoded = encoding === "gzip" || encoding === "x-gzip"
-    ? response.pipe(createGunzip())
+  const decoder = encoding === "gzip" || encoding === "x-gzip"
+    ? createGunzip()
     : encoding === "deflate"
-      ? response.pipe(createInflate())
+      ? createInflate()
       : encoding === "br"
-        ? response.pipe(createBrotliDecompress())
-        : response;
+        ? createBrotliDecompress()
+        : null;
 
   const chunks: Buffer[] = [];
   let total = 0;
-  try {
-    for await (const raw of decoded) {
+  const sink = new Writable({
+    write(raw, _encoding, done) {
       const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       total += chunk.byteLength;
-      if (total > maxBytes) throw new ResponseTooLargeError();
+      if (total > maxBytes) return done(new ResponseTooLargeError());
       chunks.push(chunk);
-    }
-  } catch (error) {
-    response.destroy();
-    if (decoded !== response) decoded.destroy();
-    throw error;
-  }
+      done();
+    },
+  });
+  // Unlike pipe + a decoder iterator, pipeline propagates upstream abort/error to every stream.
+  if (decoder) await pipeline(response, decoder, sink, { signal });
+  else await pipeline(response, sink, { signal });
   return Buffer.concat(chunks, total).toString("utf8");
 }
 
@@ -59,6 +61,7 @@ function openPinnedRequest(params: {
   userAgent: string;
   signal: AbortSignal;
 }): Promise<IncomingMessage> {
+  params.signal.throwIfAborted();
   const requestImpl = params.parsed.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     const request = requestImpl({
@@ -93,6 +96,7 @@ export async function requestPinnedText(params: {
   maxBytes: number;
   signal: AbortSignal;
 }): Promise<DirectHttpResponse> {
+  params.signal.throwIfAborted();
   const parsed = new URL(params.url);
   let lastError: unknown = new Error("No validated address is available");
   let response: IncomingMessage | null = null;
@@ -117,7 +121,7 @@ export async function requestPinnedText(params: {
     response.destroy();
     throw new ResponseTooLargeError();
   }
-  const content = params.method === "HEAD" ? "" : await readLimitedBody(response, params.maxBytes);
-  if (params.method === "HEAD") response.resume();
+  const content = params.method === "HEAD" ? "" : await readLimitedBody(response, params.maxBytes, params.signal);
+  if (params.method === "HEAD") response.destroy();
   return { status: response.statusCode || 0, headers, content };
 }

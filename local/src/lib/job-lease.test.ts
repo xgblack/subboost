@@ -51,6 +51,20 @@ describe("local job lease", () => {
     const heartbeat = startLocalJobLeaseHeartbeat({ lease, leaseMs: 300_000, intervalMs: 60_000 });
 
     await expect(heartbeat.assertOwned()).rejects.toThrow("Local job lease lost");
+    expect(heartbeat.signal.aborted).toBe(true);
     await heartbeat.stop();
+  });
+
+  it.each([0, new Error("synthetic database failure")])("cancels active work when a background renewal fails: %s", async (result) => {
+    const lease = { name: "local-cron", ownerToken: "owner", expiresAt: new Date() };
+    if (result instanceof Error) mocks.prisma.$executeRaw.mockRejectedValueOnce(result);
+    else mocks.prisma.$executeRaw.mockResolvedValueOnce(result);
+    const heartbeat = startLocalJobLeaseHeartbeat({ lease, leaseMs: 300_000, intervalMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(heartbeat.signal.aborted).toBe(true);
+    expect(heartbeat.signal.reason).toMatchObject({ name: "JobLeaseLostError", leaseName: "local-cron" });
+    await expect(heartbeat.assertOwned()).rejects.toThrow("Local job lease lost");
+    await heartbeat.stop();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

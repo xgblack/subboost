@@ -14,6 +14,7 @@ import type { ParseResult, ParsedNode } from "@subboost/core/types/node";
 import { compareSubscriptionSnapshots, createSubscriptionRequestBudget, hasUsableSubscriptionSnapshot, SUBSCRIPTION_MAX_PROFILE_REQUESTS,
   type SubscriptionSnapshotComparison } from "./snapshot-comparison";
 import { SUBSCRIPTION_IMPORT_USER_AGENTS } from "./user-agents";
+import { createRequestDeadline } from "./request-deadline";
 
 export type SourceImportPurpose = "content" | "userinfo";
 
@@ -23,6 +24,8 @@ export type SourceImportTransportRequest = {
   purpose: SourceImportPurpose;
   timeoutMs: number;
   maxBytes: number;
+  /** Transports must stop their active request and body reader when cancelled. */
+  signal?: AbortSignal;
 };
 
 export type SourceImportTransportResult = {
@@ -47,6 +50,7 @@ export type SourceImportSuccess = {
   headers: Record<string, string>;
   parsedNodes: ParsedNode[];
   parseErrors: string[];
+  warnings?: string[];
   diagnostics?: SubscriptionSnapshotComparison[];
 };
 
@@ -167,6 +171,7 @@ async function fetchAndParseWithUserAgent(
   options: {
     timeoutMs: number;
     maxBytes: number;
+    signal?: AbortSignal;
     fetchText: (request: SourceImportTransportRequest) => Promise<SourceImportTransportResult>;
   }
 ): Promise<ParsedAttempt> {
@@ -178,9 +183,10 @@ async function fetchAndParseWithUserAgent(
       purpose: "content",
       timeoutMs: options.timeoutMs,
       maxBytes: options.maxBytes,
+      signal: options.signal,
     });
   } catch {
-    response = { ok: false, error: "订阅请求失败" };
+    response = { ok: false, error: options.signal?.aborted ? "订阅源请求超时" : "订阅请求失败" };
   }
   if (!response.ok || typeof response.content !== "string") {
     const message = sanitizePublicErrorText(response.error) || "获取 url 失败";
@@ -208,6 +214,7 @@ async function fetchSupplementalUserInfoHeaders(
   options: {
     timeoutMs: number;
     maxBytes: number;
+    signal?: AbortSignal;
     fetchText: (request: SourceImportTransportRequest) => Promise<SourceImportTransportResult>;
   },
   fallbackUrl: string
@@ -222,8 +229,10 @@ async function fetchSupplementalUserInfoHeaders(
     purpose: "userinfo",
     timeoutMs: Math.min(options.timeoutMs, 8000),
     maxBytes: options.maxBytes,
+    signal: options.signal,
   });
-  return response.ok ? normalizeHeaders(response.headers) : {};
+  if (!response.ok) throw new Error("附加订阅信息获取失败，已保留节点");
+  return normalizeHeaders(response.headers);
 }
 
 export async function importSubscriptionFromUrl(
@@ -232,9 +241,11 @@ export async function importSubscriptionFromUrl(
     timeoutMs?: number;
     maxBytes?: number;
     userAgents?: readonly string[];
+    signal?: AbortSignal;
     fetchText: (request: SourceImportTransportRequest) => Promise<SourceImportTransportResult>;
   }
 ): Promise<SourceImportResult> {
+  options.signal?.throwIfAborted();
   const url = tryNormalizeSubscriptionUrlInput(request.url);
   if (!url) {
     return {
@@ -262,37 +273,57 @@ export async function importSubscriptionFromUrl(
   const maxBytes = options.maxBytes ?? 10 * 1024 * 1024;
   const userAgents = [...new Set(options.userAgents?.length ? options.userAgents : SUBSCRIPTION_IMPORT_USER_AGENTS)].slice(0, SUBSCRIPTION_MAX_PROFILE_REQUESTS);
   const budget = createSubscriptionRequestBudget(timeoutMs);
+  const deadline = createRequestDeadline(budget.deadline - Date.now(), options.signal);
   const diagnostics: SubscriptionSnapshotComparison[] = [];
   let best: ParsedAttempt | null = null;
+  try {
+    for (let index = 0; index < userAgents.length; index += 1) {
+      options.signal?.throwIfAborted();
+      const userAgent = userAgents[index];
+      const remainingTimeout = budget.remainingTimeout();
+      if (remainingTimeout === 0 || deadline.signal.aborted) break;
+      const attempt = await fetchAndParseWithUserAgent(url, userAgent, {
+        timeoutMs: remainingTimeout,
+        maxBytes,
+        fetchText: options.fetchText,
+        signal: deadline.signal,
+      });
+      options.signal?.throwIfAborted();
+      best = pickBetterAttempt(best, attempt, diagnostics);
+    }
 
-  for (let index = 0; index < userAgents.length; index += 1) {
-    const userAgent = userAgents[index];
-    const remainingTimeout = budget.remainingTimeout();
-    if (remainingTimeout === 0) break;
-    const attempt = await fetchAndParseWithUserAgent(url, userAgent, {
-      timeoutMs: remainingTimeout,
-      maxBytes,
-      fetchText: options.fetchText,
-    });
-    best = pickBetterAttempt(best, attempt, diagnostics);
+    if (!best || !best.ok || !isUsableParsedAttempt(best)) {
+      return toFailure(best, deadline.signal.aborted ? "订阅源请求超时" : "获取 url 失败");
+    }
+
+    let supplementalHeaders: Record<string, string> = {};
+    let supplementalWarning: string | undefined;
+    if (request.userinfoUrl || request.userinfoUserAgent) {
+      if (budget.remainingTimeout() === 0 || deadline.signal.aborted) {
+        supplementalWarning = "附加订阅信息请求超时，已保留节点";
+      } else {
+        try {
+          supplementalHeaders = await fetchSupplementalUserInfoHeaders(request, {
+            timeoutMs: budget.remainingTimeout(), maxBytes, fetchText: options.fetchText, signal: deadline.signal,
+          }, url);
+        } catch {
+          options.signal?.throwIfAborted();
+          supplementalWarning = "附加订阅信息获取失败，已保留节点";
+        }
+      }
+    }
+    options.signal?.throwIfAborted();
+
+    return {
+      ok: true,
+      content: best.content,
+      headers: { ...best.headers, ...supplementalHeaders },
+      parsedNodes: best.parsed.nodes,
+      parseErrors: best.parsed.errors,
+      ...(supplementalWarning ? { warnings: [supplementalWarning] } : {}),
+      diagnostics,
+    };
+  } finally {
+    deadline.dispose();
   }
-
-  if (!best || !best.ok || !isUsableParsedAttempt(best)) {
-    return toFailure(best);
-  }
-
-  const supplementalHeaders = budget.remainingTimeout() === 0 ? {} : await fetchSupplementalUserInfoHeaders(request, {
-    timeoutMs: budget.remainingTimeout(),
-    maxBytes,
-    fetchText: options.fetchText,
-  }, url).catch(() => ({}));
-
-  return {
-    ok: true,
-    content: best.content,
-    headers: { ...best.headers, ...supplementalHeaders },
-    parsedNodes: best.parsed.nodes,
-    parseErrors: best.parsed.errors,
-    diagnostics,
-  };
 }

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runLocalSubscriptionAutoUpdateCron } from "./auto-update-service";
+import { JobLeaseLostError } from "./job-lease";
 
 const mocks = vi.hoisted(() => ({
   applyCronUpdateOutcome: vi.fn(),
@@ -350,6 +351,99 @@ describe("local subscription auto update service", () => {
       requestedHosts: ["airport.example"],
       recordHosts: false,
     });
-    expect(console.info).not.toHaveBeenCalled();
+    expect(console.info).not.toHaveBeenCalledWith("[local-subscription-cron] updated", expect.anything());
+    expect(console.info).toHaveBeenCalledWith("[local-subscription-cron] finished", expect.objectContaining({ status: "skipped" }));
+  });
+
+  function concurrentFixtures(count = 3) {
+    const rows = Array.from({ length: count }, (_, i) => ({ ...subscription, id: `sub-${i + 1}` }));
+    mocks.prisma.subscription.findMany.mockResolvedValue(rows);
+    mocks.prisma.subscription.findUnique.mockImplementation(async ({ where }) => rows.find((row) => row.id === where.id));
+    mocks.prisma.$queryRaw.mockImplementation(async (_sql, name, token) => [{ name, ownerToken: token, expiresAt: new Date(Date.now() + 300000) }]);
+    mocks.readSubscriptionSecrets.mockImplementation((row) => ({ config: { id: row.id }, urls: [], nodes: [] }));
+    mocks.resolveAutomaticRefreshCompletionDecision.mockImplementation(({ target }) => ({
+      kind: "success",
+      refreshResult: { refreshedConfig: {}, cacheEntry: { nodes: [], subscriptionInfo: {} }, nodeCount: 0 },
+      nextAutoUpdateState: { state: { externalFailureCount: 0 }, shouldDisableAutoUpdate: false },
+      outcome: { status: "updated", requestedHosts: [], recordHosts: true, updatedSubscription: { subscriptionId: target.id } },
+    }));
+    return rows;
+  }
+
+  it("commits B and starts C while A is pending, with at most two active aggregates", async () => {
+    concurrentFixtures(4);
+    const releases = new Map<string, () => void>();
+    const started: string[] = [];
+    let active = 0;
+    let peak = 0;
+    mocks.refreshNodeSnapshot.mockImplementation(async ({ config }) => {
+      started.push(config.id);
+      peak = Math.max(peak, ++active);
+      await new Promise<void>((resolve) => releases.set(config.id, resolve));
+      active--;
+      return {};
+    });
+    const pending = runLocalSubscriptionAutoUpdateCron(now);
+    try {
+      await vi.waitFor(() => expect(started).toEqual(["sub-1", "sub-2"]));
+      releases.get("sub-2")!();
+      await vi.waitFor(() => expect(started).toEqual(["sub-1", "sub-2", "sub-3"]));
+      expect(mocks.prisma.subscription.updateMany.mock.calls.map(([call]) => call.where.id)).toEqual(["sub-2"]);
+      releases.get("sub-3")!();
+      await vi.waitFor(() => expect(started).toHaveLength(4));
+      releases.get("sub-4")!();
+      await vi.waitFor(() => expect(mocks.prisma.subscription.updateMany).toHaveBeenCalledTimes(3));
+      expect(peak).toBe(2);
+      releases.get("sub-1")!();
+      await pending;
+      expect(mocks.prisma.subscription.updateMany.mock.calls.map(([call]) => call.where.id)).toEqual(["sub-2", "sub-3", "sub-4", "sub-1"]);
+    } finally {
+      for (const release of releases.values()) release();
+    }
+  });
+
+  it("isolates a subscription-local lease failure and completes its peers", async () => {
+    concurrentFixtures();
+    mocks.refreshNodeSnapshot.mockImplementation(async ({ config }) => {
+      if (config.id === "sub-1") throw new JobLeaseLostError("subscription-refresh:sub-1");
+      return {};
+    });
+    await runLocalSubscriptionAutoUpdateCron(now);
+    expect(mocks.prisma.subscription.updateMany.mock.calls.map(([call]) => call.where.id).sort()).toEqual(["sub-2", "sub-3"]);
+    expect(mocks.applyCronUpdateOutcome).toHaveBeenCalledTimes(3);
+    expect(mocks.applyCronUpdateOutcome.mock.calls.some(([, outcome]) => outcome.status === "failed")).toBe(true);
+  });
+
+  it("isolates lock acquisition failures instead of rejecting the entire batch", async () => {
+    concurrentFixtures();
+    mocks.prisma.$queryRaw.mockRejectedValueOnce(new Error("synthetic acquisition failure"));
+    await expect(runLocalSubscriptionAutoUpdateCron(now)).resolves.toBeDefined();
+    expect(mocks.prisma.subscription.updateMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels both active aggregates after global lease loss and waits for their cleanup", async () => {
+    concurrentFixtures(4);
+    const controller = new AbortController();
+    const cleanups: Array<() => void> = [];
+    mocks.refreshNodeSnapshot.mockImplementation(async ({ signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => cleanups.push(() => reject(signal.reason)), { once: true });
+    }));
+    let finished = false;
+    const pending = runLocalSubscriptionAutoUpdateCron(now, { signal: controller.signal });
+    const rejected = expect(pending.finally(() => { finished = true; })).rejects.toThrow("Local job lease lost");
+    try {
+      await vi.waitFor(() => expect(mocks.refreshNodeSnapshot).toHaveBeenCalledTimes(2));
+      controller.abort(new JobLeaseLostError("local-subscription-auto-update"));
+      await vi.waitFor(() => expect(cleanups).toHaveLength(2));
+      expect(finished).toBe(false);
+      cleanups[0]();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(finished).toBe(false);
+      cleanups[1]();
+      await rejected;
+      expect(mocks.refreshNodeSnapshot).toHaveBeenCalledTimes(2);
+      expect(mocks.prisma.subscription.updateMany).not.toHaveBeenCalled();
+      expect(mocks.prisma.$executeRaw.mock.calls.filter(([sql]) => String(sql).includes("DELETE"))).toHaveLength(2);
+    } finally { cleanups.forEach((cleanup) => cleanup()); }
   });
 });

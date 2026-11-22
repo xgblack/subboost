@@ -590,7 +590,7 @@ describe("local subscription service", () => {
     });
 
     await callbacks.fetchUrlNodes({ id: "source-2", type: "url", content: "https://example.com/sub" } as any);
-    expect(mocks.importSourceUrlDirect).toHaveBeenLastCalledWith({ url: "https://example.com/sub" });
+    expect(mocks.importSourceUrlDirect).toHaveBeenLastCalledWith({ url: "https://example.com/sub" }, { signal: undefined });
 
     mocks.importSourceUrlDirect.mockResolvedValueOnce({
       ok: false,

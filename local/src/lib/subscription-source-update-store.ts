@@ -153,6 +153,7 @@ export async function persistSubscriptionRefresh(params: {
       SELECT "id" FROM "Subscription" WHERE "id" = ${params.subscriptionId} FOR UPDATE
     `;
     if (!locked.length) return false;
+    params.lease.signal?.throwIfAborted();
     const updated = await tx.subscription.updateMany({
       where: { id: params.subscriptionId, updatedAt: params.expectedUpdatedAt },
       data: { ...params.data, updatedAt: new Date() },
@@ -175,6 +176,7 @@ export async function persistSubscriptionRefresh(params: {
             ),
           });
       }
+      params.lease.signal?.throwIfAborted();
       return false;
     }
     await tx.subscriptionAutoUpdateState.upsert({
@@ -184,6 +186,7 @@ export async function persistSubscriptionRefresh(params: {
     });
     if (params.sourceUpdates)
       await recordSourceUpdateResults(tx, { ...params.sourceUpdates, subscriptionId: params.subscriptionId });
+    params.lease.signal?.throwIfAborted();
     return true;
   });
 }

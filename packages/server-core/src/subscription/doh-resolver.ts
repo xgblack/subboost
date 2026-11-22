@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { createRequestDeadline } from "./request-deadline";
 
 const DEFAULT_DOH_ENDPOINTS = [
   "https://doh.pub/dns-query",
@@ -19,6 +20,7 @@ export type DohTransportRequest = {
   headers: Record<string, string>;
   body: Uint8Array;
   timeoutMs: number;
+  signal?: AbortSignal;
 };
 
 export type DohTransportResponse = {
@@ -32,6 +34,7 @@ export type ResolveHostnameByDohOptions = {
   endpoints?: readonly string[];
   timeoutMs?: number;
   transport?: DohTransport;
+  signal?: AbortSignal;
 };
 
 function normalizeHostname(hostname: string): string {
@@ -141,22 +144,22 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 async function defaultDohTransport(request: DohTransportRequest): Promise<DohTransportResponse> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), request.timeoutMs);
+  const deadline = createRequestDeadline(request.timeoutMs, request.signal);
   try {
+    deadline.signal.throwIfAborted();
     const response = await fetch(request.endpoint, {
       method: "POST",
       headers: request.headers,
       body: toArrayBuffer(request.body),
       redirect: "manual",
-      signal: controller.signal,
+      signal: deadline.signal,
     });
     return {
       statusCode: response.status,
       body: new Uint8Array(await response.arrayBuffer()),
     };
   } finally {
-    clearTimeout(timer);
+    deadline.dispose();
   }
 }
 
@@ -164,10 +167,12 @@ async function resolveEndpointAddresses(
   endpoint: string,
   hostname: string,
   timeoutMs: number,
-  transport: DohTransport
+  transport: DohTransport,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const out = new Set<string>();
   for (const type of ["A", "AAAA"] as const) {
+    signal?.throwIfAborted();
     const response = await transport({
       endpoint,
       headers: {
@@ -176,7 +181,9 @@ async function resolveEndpointAddresses(
       },
       body: encodeDnsQuestion(hostname, type),
       timeoutMs,
+      signal,
     });
+    signal?.throwIfAborted();
     if (response.statusCode < 200 || response.statusCode >= 300) continue;
     for (const address of parseDnsResponseAddresses(response.body)) {
       if (isIP(address)) out.add(address);
@@ -189,6 +196,7 @@ export async function resolveHostnameByDoh(
   hostname: string,
   opts: ResolveHostnameByDohOptions = {}
 ): Promise<string[]> {
+  opts.signal?.throwIfAborted();
   const normalizedHostname = normalizeHostname(hostname);
   if (!normalizedHostname) return [];
 
@@ -197,7 +205,10 @@ export async function resolveHostnameByDoh(
   const transport = opts.transport ?? defaultDohTransport;
 
   for (const endpoint of endpoints) {
-    const addresses = await resolveEndpointAddresses(endpoint, normalizedHostname, timeoutMs, transport).catch(() => []);
+    const addresses = await resolveEndpointAddresses(endpoint, normalizedHostname, timeoutMs, transport, opts.signal).catch(() => {
+      opts.signal?.throwIfAborted();
+      return [];
+    });
     if (addresses.length > 0) return addresses;
   }
 

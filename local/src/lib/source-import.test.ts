@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchSourceUserInfoHeadersDirect, importSourceUrlDirect } from "./source-import";
 
 const mocks = vi.hoisted(() => ({
@@ -68,12 +68,91 @@ async function runTransport(url: string, overrides: Record<string, unknown> = {}
 }
 
 describe("local source import transport", () => {
+  afterEach(() => vi.useRealTimers());
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getAllowUnsafeSubscriptionSources.mockResolvedValue(false);
     mocks.lookup.mockRejectedValue(new Error("dns unavailable"));
     mocks.requestPinnedText.mockResolvedValue({ status: 200, headers: {}, content: "ss://node" });
     globalThis.fetch = vi.fn();
+  });
+
+  it("times out OS DNS waiting and never connects using its late answer", async () => {
+    vi.useFakeTimers();
+    let answer!: (value: Array<{ address: string }>) => void;
+    mocks.lookup.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const pending = runTransport("https://example.com/sub", { timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toMatchObject({ ok: false, error: "订阅源请求超时", errorInfo: { category: "network" } });
+    answer([{ address: "93.184.216.34" }]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.requestPinnedText).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels DNS with the parent reason rather than reporting a source failure", async () => {
+    mocks.lookup.mockReturnValue(new Promise(() => {}));
+    const controller = new AbortController();
+    const reason = new Error("lease lost fixture");
+    const pending = runTransport("https://example.com/sub", { signal: controller.signal });
+    const rejected = expect(pending).rejects.toBe(reason);
+    await vi.waitFor(() => expect(mocks.lookup).toHaveBeenCalled());
+    controller.abort(reason);
+    await rejected;
+    expect(mocks.requestPinnedText).not.toHaveBeenCalled();
+  });
+
+  it("cancels an unfinished unpinned body and clears its timeout", async () => {
+    vi.useFakeTimers();
+    mocks.getAllowUnsafeSubscriptionSources.mockResolvedValue(true);
+    const cancel = vi.fn();
+    vi.mocked(globalThis.fetch).mockResolvedValue(new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("partial")); }, cancel,
+    })));
+    const pending = runTransport("https://example.com/sub", { timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toMatchObject({ ok: false, error: "订阅源请求超时" });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shares one timeout across redirects instead of restarting it for each target", async () => {
+    vi.useFakeTimers();
+    mocks.getAllowUnsafeSubscriptionSources.mockResolvedValue(true);
+    const observedSignals: AbortSignal[] = [];
+    vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
+      const signal = init!.signal as AbortSignal;
+      observedSignals.push(signal);
+      if (observedSignals.length === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return response("", { status: 302, headers: { location: "/second" } });
+      }
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    });
+    const pending = runTransport("https://example.com/sub", { timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toMatchObject({ ok: false, error: "订阅源请求超时" });
+    expect(observedSignals).toHaveLength(2);
+    expect(observedSignals[1]).toBe(observedSignals[0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops all DoH fallback requests when the enclosing content deadline expires", async () => {
+    vi.useFakeTimers();
+    mocks.lookup.mockResolvedValue([{ address: "198.18.3.6" }]);
+    let dohSignal: AbortSignal | undefined;
+    vi.mocked(globalThis.fetch).mockImplementation(async (_url, init) => {
+      dohSignal = init!.signal as AbortSignal;
+      return new Promise((_resolve, reject) => dohSignal!.addEventListener("abort", () => reject(dohSignal!.reason), { once: true }));
+    });
+    const pending = runTransport("https://example.com/sub", { timeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toMatchObject({ ok: false, error: "订阅源请求超时" });
+    expect(dohSignal?.aborted).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledOnce();
+    expect(mocks.requestPinnedText).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("rejects private, local, credentialed, and unsupported URLs before fetching", async () => {

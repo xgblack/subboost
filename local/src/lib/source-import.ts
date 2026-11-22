@@ -14,6 +14,7 @@ import {
   type SourceImportTransportResult,
 } from "@subboost/server-core/subscription";
 import { resolveHostnameByDoh } from "@subboost/server-core/subscription/doh-resolver";
+import { awaitWithSignal, createRequestDeadline } from "@subboost/server-core/subscription/request-deadline";
 import {
   isPrivateOrReservedIp,
   normalizeResolvedIpAddresses,
@@ -73,11 +74,13 @@ function normalizeHostname(hostname: string): string {
 
 async function validatePublicFetchTarget(
   url: string,
-  allowUnsafeSubscriptionSources: boolean
+  allowUnsafeSubscriptionSources: boolean,
+  signal: AbortSignal,
 ): Promise<
   | { ok: true; addresses: string[] | null }
   | { ok: false; failure: SourceImportTransportResult }
 > {
+  signal.throwIfAborted();
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -106,7 +109,10 @@ async function validatePublicFetchTarget(
 
   if (isIP(hostname)) return { ok: true, addresses: [hostname] };
 
-  const records = await lookup(hostname, { all: true, verbatim: true }).catch(() => null);
+  const records = await awaitWithSignal(lookup(hostname, { all: true, verbatim: true }), signal).catch(() => {
+    signal.throwIfAborted();
+    return null;
+  });
   if (!records || records.length === 0) {
     return { ok: false, failure: toFailure("DNS 暂时不可用，请稍后再试") };
   }
@@ -114,7 +120,7 @@ async function validatePublicFetchTarget(
   const finalAddresses = shouldRecheckFakeIpDnsAnswers(addresses)
     ? selectDnsAddressesAfterFakeIpRecheck(
         addresses,
-        await resolveHostnameByDoh(hostname, { timeoutMs: DOH_TIMEOUT_MS })
+        await resolveHostnameByDoh(hostname, { timeoutMs: DOH_TIMEOUT_MS, signal })
       )
     : addresses;
   const addressesToCheck = finalAddresses.length > 0 ? finalAddresses : addresses;
@@ -128,20 +134,32 @@ async function validatePublicFetchTarget(
   return { ok: true, addresses: addressesToCheck };
 }
 
-async function readFetchBodyLimited(response: Response, maxBytes: number): Promise<string> {
+async function readFetchBodyLimited(response: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
   if (!response.body) return "";
   const reader = response.body.getReader();
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => { cancellation ??= reader.cancel().catch(() => undefined); return cancellation; };
+  const onAbort = () => { void cancel(); };
+  signal.addEventListener("abort", onAbort, { once: true });
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel("response too large").catch(() => undefined);
-      throw new ResponseTooLargeError();
+  try {
+    signal.throwIfAborted();
+    while (true) {
+      const { done, value } = await reader.read();
+      signal.throwIfAborted();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new ResponseTooLargeError();
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (error) {
+    await cancel();
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    if (cancellation) await cancellation;
+    reader.releaseLock();
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -159,6 +177,7 @@ async function requestUnpinnedText(params: {
   maxBytes: number;
   signal: AbortSignal;
 }): Promise<DirectHttpResponse> {
+  params.signal.throwIfAborted();
   const response = await fetch(params.url, {
     method: params.method,
     headers: {
@@ -179,7 +198,8 @@ async function requestUnpinnedText(params: {
     await response.body?.cancel().catch(() => undefined);
     throw new ResponseTooLargeError();
   }
-  const content = params.method === "HEAD" ? "" : await readFetchBodyLimited(response, params.maxBytes);
+  const content = params.method === "HEAD" ? "" : await readFetchBodyLimited(response, params.maxBytes, params.signal);
+  if (params.method === "HEAD") await response.body?.cancel().catch(() => undefined);
   return { status: response.status, headers, content };
 }
 
@@ -187,17 +207,20 @@ async function fetchTextDirect(
   request: SourceImportTransportRequest,
   allowUnsafeSubscriptionSources: boolean
 ): Promise<SourceImportTransportResult> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), request.timeoutMs);
+  const deadline = createRequestDeadline(request.timeoutMs, request.signal);
+  let phase = "dns";
 
   try {
     let currentUrl = request.url;
     let response: DirectHttpResponse | null = null;
     for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
-      const validation = await validatePublicFetchTarget(currentUrl, allowUnsafeSubscriptionSources);
+      phase = "dns";
+      const validation = await validatePublicFetchTarget(currentUrl, allowUnsafeSubscriptionSources, deadline.signal);
+      deadline.signal.throwIfAborted();
       if (!validation.ok) return validation.failure;
 
       const method = request.purpose === "userinfo" ? "HEAD" : "GET";
+      phase = "http";
       response = validation.addresses
         ? await requestPinnedText({
             url: currentUrl,
@@ -205,15 +228,16 @@ async function fetchTextDirect(
             method,
             userAgent: request.userAgent,
             maxBytes: request.maxBytes,
-            signal: controller.signal,
+            signal: deadline.signal,
           })
         : await requestUnpinnedText({
             url: currentUrl,
             method,
             userAgent: request.userAgent,
             maxBytes: request.maxBytes,
-            signal: controller.signal,
+            signal: deadline.signal,
           });
+      deadline.signal.throwIfAborted();
 
       if (response.status < 300 || response.status >= 400) break;
       const location = response.headers.location;
@@ -235,11 +259,17 @@ async function fetchTextDirect(
       responseStatus: response.status,
     };
   } catch (error) {
+    // Parent cancellation is a task-level event, not an upstream-source failure.
+    request.signal?.throwIfAborted();
+    if (deadline.signal.aborted) {
+      console.warn("[source-import] request timed out", { purpose: request.purpose, phase });
+      return toFailure("订阅源请求超时");
+    }
     if (error instanceof ResponseTooLargeError) return toFailure("订阅响应过大", 413);
     const message = error instanceof Error ? error.message : String(error);
     return toFailure(message);
   } finally {
-    clearTimeout(timer);
+    deadline.dispose();
   }
 }
 
@@ -249,11 +279,14 @@ export async function fetchRuleContentDirect(url: string): Promise<SourceImportT
     timeoutMs: 15000, maxBytes: 10 * 1024 * 1024 }, allowUnsafeSubscriptionSources);
 }
 
-export async function importSourceUrlDirect(request: SourceImportRequest): Promise<SourceImportResult> {
+export async function importSourceUrlDirect(request: SourceImportRequest, options: { signal?: AbortSignal } = {}): Promise<SourceImportResult> {
+  options.signal?.throwIfAborted();
   const allowUnsafeSubscriptionSources = await getAllowUnsafeSubscriptionSources();
+  options.signal?.throwIfAborted();
   return importSubscriptionFromUrl(request, {
     timeoutMs: DEFAULT_TIMEOUT_MS,
     maxBytes: DEFAULT_MAX_BYTES,
+    signal: options.signal,
     fetchText: (transportRequest) => fetchTextDirect(transportRequest, allowUnsafeSubscriptionSources),
   });
 }
@@ -261,7 +294,8 @@ export async function importSourceUrlDirect(request: SourceImportRequest): Promi
 export async function fetchSourceUserInfoHeadersDirect(source: {
   userinfoUrl?: string;
   userinfoUserAgent?: string;
-}): Promise<Record<string, string> | undefined> {
+}, options: { signal?: AbortSignal } = {}): Promise<Record<string, string> | undefined> {
+  options.signal?.throwIfAborted();
   if (!source.userinfoUrl) return undefined;
   const allowUnsafeSubscriptionSources = await getAllowUnsafeSubscriptionSources();
   const response = await fetchTextDirect(
@@ -271,6 +305,7 @@ export async function fetchSourceUserInfoHeadersDirect(source: {
       purpose: "userinfo",
       timeoutMs: USERINFO_TIMEOUT_MS,
       maxBytes: USERINFO_MAX_BYTES,
+      signal: options.signal,
     },
     allowUnsafeSubscriptionSources
   );

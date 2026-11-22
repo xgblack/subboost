@@ -8,8 +8,8 @@ export type LocalJobLease = {
 };
 
 export class JobLeaseLostError extends Error {
-  constructor(name: string) {
-    super(`Local job lease lost: ${name}`);
+  constructor(readonly leaseName: string) {
+    super(`Local job lease lost: ${leaseName}`);
     this.name = "JobLeaseLostError";
   }
 }
@@ -63,16 +63,20 @@ export function startLocalJobLeaseHeartbeat(params: {
   lease: LocalJobLease;
   leaseMs: number;
   intervalMs: number;
-}): { assertOwned: () => Promise<void>; stop: () => Promise<void> } {
+}): { signal: AbortSignal; assertOwned: () => Promise<void>; stop: () => Promise<void> } {
   let stopped = false;
-  let lost = false;
+  const controller = new AbortController();
   let pending: Promise<void> = Promise.resolve();
 
   const renew = async () => {
     if (stopped) return;
-    if (lost || !(await renewLocalJobLease(params.lease, params.leaseMs))) {
-      lost = true;
-      throw new JobLeaseLostError(params.lease.name);
+    controller.signal.throwIfAborted();
+    try {
+      if (!(await renewLocalJobLease(params.lease, params.leaseMs))) throw new JobLeaseLostError(params.lease.name);
+    } catch {
+      // A failed renewal cannot prove ownership either. Cancel active I/O, not just the next commit.
+      controller.abort(new JobLeaseLostError(params.lease.name));
+      throw controller.signal.reason;
     }
   };
   const enqueue = () => {
@@ -86,9 +90,13 @@ export function startLocalJobLeaseHeartbeat(params: {
   timer.unref?.();
 
   return {
+    signal: controller.signal,
     assertOwned: async () => {
-      if (stopped || lost) throw new JobLeaseLostError(params.lease.name);
+      if (stopped) throw new JobLeaseLostError(params.lease.name);
+      controller.signal.throwIfAborted();
       await enqueue();
+      if (stopped) throw new JobLeaseLostError(params.lease.name);
+      controller.signal.throwIfAborted();
     },
     stop: async () => {
       stopped = true;

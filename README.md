@@ -32,6 +32,10 @@ Use **订阅源** in a subscription's action row to inspect per-source status an
 
 History starts with updates performed after upgrading and retains the latest 200 records per source. Re-enable automatic updates in the existing settings if an older version disabled them. Deployment applies the additive database migration; source installations can run `npm --prefix local run db:migrate` first.
 
+Each automatic run updates at most two due aggregates concurrently. Each aggregate publishes its snapshot and history independently, while its sources remain sequential and manual/automatic refreshes remain mutually exclusive. Existing polling and due-time rules are unchanged.
+
+Content requests have a 15-second wall-clock limit covering DNS, connections, redirects, response bodies, and decompression. Up to four client profiles share a 60-second negotiation budget. Supplemental metadata requests are limited to 8 seconds and individual DoH requests to 4 seconds, also bounded by their parent request. Source timeouts retain old nodes; metadata timeouts retain successfully fetched nodes. Losing a lease cancels unfinished work and prevents late commits. These limits are server-side constants; this fix requires no new environment variables or database migrations.
+
 ## Interface Preview
 
 <p align="center">

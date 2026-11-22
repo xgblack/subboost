@@ -136,5 +136,5 @@ export const SUBSCRIPTION_NEGOTIATION_MAX_TIME_MS = 60_000;
 
 export function createSubscriptionRequestBudget(timeoutMs: number) {
   const deadline = Date.now() + Math.min(Math.max(1, timeoutMs) * SUBSCRIPTION_MAX_PROFILE_REQUESTS, SUBSCRIPTION_NEGOTIATION_MAX_TIME_MS);
-  return { remainingTimeout: () => Math.max(0, Math.min(Math.max(1, timeoutMs), deadline - Date.now())) };
+  return { deadline, remainingTimeout: () => Math.max(0, Math.min(Math.max(1, timeoutMs), deadline - Date.now())) };
 }

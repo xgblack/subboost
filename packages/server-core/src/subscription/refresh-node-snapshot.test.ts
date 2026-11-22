@@ -644,4 +644,28 @@ describe("targeted source refresh", () => {
     })).rejects.toThrow("database unavailable");
   });
 
+  it("does not convert task cancellation into a source timeout or continue with its peers", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("cancelled fixture", "AbortError");
+    const fetchUrlNodes = vi.fn(async () => {
+      controller.abort(reason);
+      throw reason;
+    });
+    await expect(refreshNodeSnapshot({ config: { sources }, urls: [], storedNodes: nodes,
+      fetchUrlNodes, signal: controller.signal,
+    })).rejects.toBe(reason);
+    expect(fetchUrlNodes).toHaveBeenCalledOnce();
+  });
+
+  it("propagates cancellation during supplemental metadata instead of publishing a partial snapshot", async () => {
+    const controller = new AbortController();
+    const reason = new DOMException("cancelled fixture", "AbortError");
+    const fetchUrlNodes = vi.fn(async () => ({ ok: true, nodes: [nodes[0]] }));
+    await expect(refreshNodeSnapshot({
+      config: { sources: [{ ...sources[0], userinfoUrl: "https://a.example/info" }] }, urls: [], storedNodes: nodes,
+      fetchUrlNodes, signal: controller.signal,
+      fetchUrlUserInfo: async () => { controller.abort(reason); throw reason; },
+    })).rejects.toBe(reason);
+  });
+
 });
